@@ -28,6 +28,16 @@
   .barOuter { height:20px; background:rgba(255,255,255,.13); border-radius:6px; overflow:hidden; margin-top:4px; }
   .barInner { height:100%; width:100%; background:#57d957; }
   #beamCounts { margin-top:8px; font-size:20px; color:#dfe7ee; }
+  #resBox { position:absolute; left:22px; top:212px; min-width:280px; font-size:18px; }
+  #resBox h3 { margin:0 0 8px 0; font-size:19px; letter-spacing:3px; }
+  #resCur { font-size:20px; color:#eef2f6; margin-bottom:8px; }
+  #resCur b { color:#8fd0ff; }
+  .resRow { display:flex; justify-content:space-between; gap:18px; padding:2px 0; color:#b9c6d2; }
+  .resRow b { color:#dfe7ee; font-weight:600; }
+  .resRow.cur { color:#ffd94d; }
+  .resRow.cur b { color:#ffd94d; }
+  #resHint { margin-top:8px; font-size:16px; color:#9fb2c2; }
+  #resHint .k { color:#8fd0ff; font-weight:700; }
   #helpBox { position:absolute; right:22px; bottom:22px; width:340px; font-size:18px; line-height:1.5; color:#cfd8e0; }
   #helpBox .k { color:#8fd0ff; font-weight:700; }
   #toast { position:absolute; top:110px; left:50%; transform:translateX(-50%);
@@ -52,6 +62,7 @@
   .carCard .nm { font-size:24px; font-weight:800; }
   .carCard .bl { font-size:17px; color:#c6d2dd; margin-top:4px; line-height:1.35; }
   .carCard .ts { font-size:17px; color:#8fd0ff; margin-top:6px; font-weight:700; }
+  .carCard .res { font-size:16px; color:#ffd94d; margin-top:4px; font-weight:600; }
   .controls { display:grid; grid-template-columns:170px 1fr; gap:6px 16px; font-size:20px; margin:12px 0 16px 0; }
   .controls .k { color:#8fd0ff; font-weight:700; }
   .bigBtn { pointer-events:auto; display:inline-block; background:#1d6fd1; color:#fff; border:none;
@@ -74,6 +85,12 @@
     <div style="display:flex;justify-content:space-between"><span>Integrity</span><b id="integVal">100%</b></div>
     <div class="barOuter"><div id="integBar" class="barInner"></div></div>
     <div id="beamCounts">Beams: 0 broken · 0 bent</div>
+  </div>
+  <div id="resBox" class="panel">
+    <h3>BEAM RESOLUTION</h3>
+    <div id="resCur">—</div>
+    <div id="resList"></div>
+    <div id="resHint"><span class="k">[ ]</span> beam count &nbsp; <span class="k">T</span> hide panel</div>
   </div>
   <div id="helpBox" class="panel">
     <span class="k">W A S D</span> drive &nbsp; <span class="k">Space</span> handbrake<br>
@@ -100,6 +117,8 @@
       <span class="k">R</span><span>reset — fresh car on the road</span>
       <span class="k">F</span><span>repair in place — only at a full stop</span>
       <span class="k">1 – 5</span><span>switch car</span>
+      <span class="k">[ / ]</span><span>beam count of the current car — Normal 150 / High 250 / Ultra 500 nodes, then +10 nodes per press up to 1000 (respawns the car; each car remembers its own setting)</span>
+      <span class="k">T</span><span>beam display on / off</span>
       <span class="k">P / Esc</span><span>pause</span>
     </div>
     <div style="text-align:center"><button class="bigBtn" id="startBtn">Drive</button></div>
@@ -129,6 +148,7 @@ function hash2i(x,y){ const s=Math.sin(x*269.5+y*183.3+74.7)*43758.5453; return 
 /* ---------------- Track ---------------- */
 const DS = 5;                    // centerline sample spacing (m)
 const ROAD_HALF = 4.6;
+const BARRIER_LAT = 5.6;         // guardrail line: outside the road + margin
 const CLIFF_FIRST = 600, CLIFF_PERIOD = 750, CLIFF_LEN = 170, CLIFF_EDGE = 7.0;
 
 class TrackWorld {
@@ -136,6 +156,8 @@ class TrackWorld {
     this.seed = (seed===undefined?1337:seed)|0;
     this.samples = [{s:0, x:0, z:0, y:this.elev(0), h:0, k:0}];
     this.obsCache = new Map();
+    this.defCache = new Map();
+    this.barrierCache = new Map();
     this.extraObstacles = [];
   }
   elev(s){ return 3.0*Math.sin(s*0.004) + 2.0*Math.sin(s*0.011+1.7) + 0.8*Math.sin(s*0.023+4.1); }
@@ -174,9 +196,93 @@ class TrackWorld {
     const d = ah - 7.6;
     return d*(0.22 + 0.06*Math.sin(s*0.013)) + (Math.sin(s*0.05+ah*0.3)+Math.sin(s*0.021-ah*0.17))*0.35*Math.min(1,d*0.2);
   }
+  /* Road defects: deterministic, sparse. Defect k sits at
+     s = 190 + 275k ± 60 (spacing 155–395 m; the first is at s >= 130, well
+     past the spawn and the first ~60 m are always clean), |lat| <=
+     ROAD_HALF - 0.95. Potholes dip 0.06–0.12 m, bumps rise 0.04–0.07 m —
+     both are real height inside the same analytic path physics uses.
+     Cracks are visual only (amp 0, the renderer draws them). */
+  defectAt(k){
+    if (this.defCache.has(k)) return this.defCache.get(k);
+    const h1 = hash2i(k, this.seed*7+11), h2 = hash2i(k, this.seed*13+23),
+          h3 = hash2i(k, this.seed*17+37), h4 = hash2i(k, this.seed*19+41),
+          h5 = hash2i(k, this.seed*23+53);
+    const type = h3 < 0.45 ? 'pothole' : (h3 < 0.75 ? 'bump' : 'crack');
+    const d = { k:k, s:190 + k*275 + (h1-0.5)*120, lat:(h2*2-1)*(ROAD_HALF-0.95),
+      type:type, r:0.45 + h4*0.35,
+      amp: type==='pothole' ? -(0.06 + h5*0.06) : type==='bump' ? (0.04 + h5*0.03) : 0,
+      seed:h5*1000 + k };
+    this.defCache.set(k, d);
+    if (this.defCache.size > 64){ const kk = this.defCache.keys().next().value; this.defCache.delete(kk); }
+    return d;
+  }
+  defectOffset(s, lat){
+    let off = 0;
+    const k0 = Math.max(0, Math.floor((s-190-62)/275)), k1 = k0+2;
+    for (let k=k0;k<=k1;k++){
+      const d = this.defectAt(k);
+      if (!d.amp) continue;
+      const qs = (s-d.s)/d.r, ql = (lat-d.lat)/(d.r*0.8), q = qs*qs + ql*ql;
+      if (q < 4) off += d.amp * Math.exp(-2.4*q);
+    }
+    return off;
+  }
+  defectsInRange(s0, s1){
+    const out = [];
+    const k0 = Math.max(0, Math.floor((s0-190-62)/275)), k1 = Math.max(0, Math.ceil((s1-190+62)/275));
+    for (let k=k0;k<=k1;k++){ const d = this.defectAt(k); if (d.s >= s0-1 && d.s <= s1+1) out.push(d); }
+    return out;
+  }
+  /* Guardrail stretches: deterministic per 140 m block, from s=300 on.
+     Cliff blocks get a rail on the cliff side, curve blocks on the outside
+     of the bend, plain blocks occasionally. A stretch never fills its
+     block — there are always gaps. The rail line sits at |lat| =
+     BARRIER_LAT, outside the drivable road plus margin. */
+  barrierBlock(b){
+    if (this.barrierCache.has(b)) return this.barrierCache.get(b);
+    let out = null;
+    const b0 = b*140;
+    if (b0 >= 300){
+      const rng = mulberry32(this.seed*31 + b*104729 + 7);
+      const mid = b0 + 70;
+      const cz = this.cliffAt(mid), kap = this.kappa(mid);
+      let side = 0, prob = 0.15;
+      if (cz){ side = cz.side; prob = 0.85; }
+      else if (Math.abs(kap) > 0.0035){ side = -Math.sign(kap); prob = 0.6; }
+      if (rng() <= prob){
+        if (!side) side = rng() < 0.5 ? -1 : 1;
+        const s0 = b0 + 12 + rng()*36;
+        const s1 = Math.min(b0 + 134, s0 + 55 + rng()*55);
+        out = { s0:s0, s1:s1, side:side, lat:side*BARRIER_LAT };
+      }
+    }
+    this.barrierCache.set(b, out);
+    if (this.barrierCache.size > 64){ const kk = this.barrierCache.keys().next().value; this.barrierCache.delete(kk); }
+    return out;
+  }
+  barrierStretchesIn(s0, s1){
+    const out = [];
+    const b0 = Math.max(0, Math.floor(s0/140)), b1 = Math.floor(s1/140);
+    for (let b=b0;b<=b1;b++){ const st = this.barrierBlock(b); if (st && st.s1 >= s0 && st.s0 <= s1) out.push(st); }
+    return out;
+  }
+  barrierObstaclesForSegment(seg){
+    // the rail as a row of overlapping circles: the penalty-contact system
+    // reads it as a wall, so cars cannot clip through it
+    const out = [];
+    const g0 = seg*50, g1 = g0 + 50;
+    for (const st of this.barrierStretchesIn(g0, g1)){
+      const a = Math.max(st.s0, g0), b = Math.min(st.s1, g1);
+      for (let s = Math.ceil(a/1.2)*1.2; s <= b; s += 1.2){
+        const p = this.trackPoint(s), rx = Math.cos(p.heading), rz = -Math.sin(p.heading);
+        out.push({ type:'rail', s:s, lat:st.lat, x:p.x+rx*st.lat, z:p.z+rz*st.lat, y:p.y, r:0.25, h:0.8 });
+      }
+    }
+    return out;
+  }
   heightAtSL(s, lat){
     const base = this.elev(s), ah = Math.abs(lat);
-    if (ah <= ROAD_HALF) return { h:base, surface:'road' };
+    if (ah <= ROAD_HALF) return { h:base + this.defectOffset(s, lat), surface:'road' };
     const cz = this.cliffAt(s);
     if (cz && lat*cz.side > 0){
       const d = ah - cz.edge;
@@ -265,6 +371,10 @@ class TrackWorld {
         const dx = o.x-x, dz = o.z-z;
         if (dx*dx+dz*dz < 3600) out.push(o);
       }
+      for (const o of this.barrierObstaclesForSegment(g)){
+        const dx = o.x-x, dz = o.z-z;
+        if (dx*dx+dz*dz < 3600) out.push(o);
+      }
     }
     for (const o of this.extraObstacles){
       const dx = o.x-x, dz = o.z-z;
@@ -348,10 +458,115 @@ const CAR_DEFS = [
     wheelBase:0.58, trackW:0.87, wheelR:0.34, sections:stdSections(0.88,1.34,0.86), topKmh:214 }
 ];
 
+/* ---------------- Beam resolution: node-target grid cage ----------------
+   The cage is a REGULAR grid: S sections evenly spaced along the car, each
+   a ring of P nodes evenly spaced by arc length around a rounded-rect
+   cross-section whose size comes from interpolating the car's own 4-point
+   profile (hw / yLow / yMid / yTop) at that z. Beams are structured only —
+   ring beams, longitudinal beams, one alternating diagonal per panel quad
+   — plus fixed extras: bumper rails, strut-mount links, suspension links.
+   The per-car setting is a target NODE count:
+   total nodes = S*P + 10 (the +10 = 2 bumpers + 4 mounts + 4 wheels). */
+const RES_TARGET_DEFAULT = 150;
+function resNameFor(target){
+  if (target <= 150) return 'NORMAL';
+  if (target <= 250) return 'HIGH';
+  if (target <= 500) return 'ULTRA';
+  return 'ULTRA+';
+}
+function profileAt(def, zf){
+  const pts = def.sections;
+  if (zf >= pts[0].z) return pts[0];
+  const last = pts[pts.length-1];
+  if (zf <= last.z) return last;
+  for (let i=0;i<pts.length-1;i++){
+    const a = pts[i], b = pts[i+1];
+    if (zf <= a.z && zf >= b.z){
+      const t = (a.z - zf)/(a.z - b.z);
+      return { z:zf, hw:lerp(a.hw,b.hw,t), yLow:lerp(a.yLow,b.yLow,t),
+               yMid:lerp(a.yMid,b.yMid,t), yTop:lerp(a.yTop,b.yTop,t) };
+    }
+  }
+  return last;
+}
+function chooseGrid(target){
+  const want = Math.max(16, target - 10);
+  let best = null;
+  for (const P of [8,10,12,14,16,18,20]){
+    for (let S=3; S<=60; S++){
+      const err = Math.abs(S*P - want);
+      if (!best || err < best.err || (err === best.err && S > best.S)) best = { S:S, P:P, err:err };
+    }
+  }
+  return best;
+}
+/* P points evenly spaced by arc length around a rounded-rect cross-section
+   (bottom half-width hwB at yLow, top half-width hwT at yTop). Point 0 is
+   the bottom-centre; the walk heads up the +x side first, so with even P
+   the ring is mirror-symmetric and point P/2 is the top-centre. */
+function ringPoints(P, hwB, hwT, yLow, yTop){
+  const r = Math.min(0.13, (yTop-yLow)*0.32, hwB*0.4);
+  const V = [[hwB,yLow],[hwT,yTop],[-hwT,yTop],[-hwB,yLow]];
+  const E = [], X = [];
+  for (let i=0;i<4;i++){
+    const prev = V[(i+3)%4], cur = V[i], next = V[(i+1)%4];
+    const dIn = Math.hypot(cur[0]-prev[0], cur[1]-prev[1]) || 1;
+    const dOut = Math.hypot(next[0]-cur[0], next[1]-cur[1]) || 1;
+    const rr = Math.max(0.015, Math.min(r, dIn*0.45, dOut*0.45));
+    E.push([cur[0]-(cur[0]-prev[0])/dIn*rr, cur[1]-(cur[1]-prev[1])/dIn*rr]);
+    X.push([cur[0]+(next[0]-cur[0])/dOut*rr, cur[1]+(next[1]-cur[1])/dOut*rr]);
+  }
+  const dense = [];
+  for (let i=0;i<4;i++){
+    const a = X[i], b = E[(i+1)%4], c = V[(i+1)%4], d = X[(i+1)%4];
+    const lineLen = Math.hypot(b[0]-a[0], b[1]-a[1]);
+    const nl = Math.max(1, Math.ceil(lineLen/0.03));
+    for (let k=0;k<nl;k++){ const t = k/nl; dense.push([lerp(a[0],b[0],t), lerp(a[1],b[1],t)]); }
+    const bezLen = Math.hypot(c[0]-b[0], c[1]-b[1]) + Math.hypot(d[0]-c[0], d[1]-c[1]);
+    const nb = Math.max(2, Math.ceil(bezLen/0.03));
+    for (let k=0;k<nb;k++){
+      const t = k/nb, u = 1-t;
+      dense.push([u*u*b[0]+2*u*t*c[0]+t*t*d[0], u*u*b[1]+2*u*t*c[1]+t*t*d[1]]);
+    }
+  }
+  const cum = [0];
+  for (let i=1;i<=dense.length;i++){
+    const a = dense[i-1], b = dense[i%dense.length];
+    cum.push(cum[i-1] + Math.hypot(b[0]-a[0], b[1]-a[1]));
+  }
+  const total = cum[dense.length];
+  // arc position of the bottom-centre (0, yLow): it lies on the bottom edge
+  let s0 = 0, bestD = 1e9, found = false;
+  for (let i=0;i<dense.length;i++){
+    const a = dense[i], b = dense[(i+1)%dense.length];
+    if (Math.abs(a[1]-yLow) < 1e-6 && Math.abs(b[1]-yLow) < 1e-6 && a[0] <= 0 && b[0] >= 0){
+      const t = (0 - a[0])/((b[0]-a[0]) || 1);
+      s0 = cum[i] + t*(cum[i+1]-cum[i]); found = true; break;
+    }
+    const dd = Math.hypot(a[0], a[1]-yLow);
+    if (dd < bestD){ bestD = dd; s0 = cum[i]; }
+  }
+  const out = [];
+  for (let j=0;j<P;j++){
+    const s = (s0 + total*j/P) % total;
+    let i = 0;
+    while (i < dense.length-1 && cum[i+1] < s) i++;
+    const segLen = (cum[i+1]-cum[i]) || 1;
+    const t = clamp((s - cum[i])/segLen, 0, 1);
+    const a = dense[i], b = dense[(i+1)%dense.length];
+    out.push([lerp(a[0],b[0],t), lerp(a[1],b[1],t)]);
+  }
+  return out;
+}
+/* per-car target node count, parallel to CAR_DEFS (default Normal = 150).
+   The game persists this in localStorage; tests set it directly. */
+const carRes = CAR_DEFS.map(()=>RES_TARGET_DEFAULT);
+
 /* ---------------- Soft-body car ---------------- */
 class SoftBodyCar {
-  constructor(def, world){
+  constructor(def, world, targetNodes){
     this.def = def; this.world = world;
+    this.targetNodes = (targetNodes===undefined ? RES_TARGET_DEFAULT : targetNodes);
     this.buildStructure();
     this.steerAngle = 0; this.sHint = 100; this.distance = 0;
     this.obstacleHits = 0; this.hitCooldown = 0; this.groundHits = 0; this.groundHitCooldown = 0;
@@ -359,119 +574,321 @@ class SoftBodyCar {
   }
   buildStructure(){
     const def = this.def, L = def.length, W = def.width;
-    const nodes = [];
-    const addNode = (x,y,z,mass,kind)=>{ nodes.push({ pos:{x:0,y:0,z:0}, vel:{x:0,y:0,z:0},
-      rest:{x:x,y:y,z:z}, mass:mass, kind:kind, radius:(kind==='wheel'?def.wheelR:0.06) }); return nodes.length-1; };
-    const wheelMass = 13, chassisMassEach = (def.mass - 4*wheelMass)/38;
-    this.secIdx = [];
-    def.sections.forEach(sec=>{
-      const hw = W*0.5*sec.hw, z = sec.z*L, ids = {}, yLow = sec.yLow + (def.rideBoost||0);
-      ids.lowL = addNode(-hw, yLow, z, chassisMassEach, 'chassis');
-      ids.lowR = addNode( hw, yLow, z, chassisMassEach, 'chassis');
-      ids.midL = addNode(-hw*1.01, sec.yMid, z, chassisMassEach, 'chassis');
-      ids.midR = addNode( hw*1.01, sec.yMid, z, chassisMassEach, 'chassis');
-      const topMass = chassisMassEach * (def.topMassScale||1);
-      ids.upL  = addNode(-hw*0.8, sec.yTop, z, topMass, 'chassis');
-      ids.upR  = addNode( hw*0.8, sec.yTop, z, topMass, 'chassis');
-      ids.floorC = addNode(0, yLow+0.03, z, chassisMassEach, 'chassis');
-      ids.topC   = addNode(0, sec.yTop+0.03, z, topMass, 'chassis');
-      this.secIdx.push(ids);
-    });
-    const s0 = this.secIdx[0], s3 = this.secIdx[3];
-    this.frontBumper = addNode(0, def.sections[0].yMid*0.85, L*0.5+0.18, chassisMassEach, 'chassis');
-    this.rearBumper  = addNode(0, def.sections[3].yMid*0.85, -L*0.5-0.18, chassisMassEach, 'chassis');
+    const target = clamp(Math.round(this.targetNodes||RES_TARGET_DEFAULT), 40, 2000);
+    const grid = chooseGrid(target);
+    const S = grid.S, P = grid.P;
+    this.gridS = S; this.gridP = P;
+    const nodes = [], rawW = [];
+    const addNode = (x,y,z,w,kind)=>{ nodes.push({ pos:{x:0,y:0,z:0}, vel:{x:0,y:0,z:0},
+      rest:{x:x,y:y,z:z}, mass:1, kind:kind, radius:(kind==='wheel'?def.wheelR:0.06) });
+      rawW.push(w); return nodes.length-1; };
+    const wheelMass = 13, topScale = (def.topMassScale===undefined ? 1 : def.topMassScale);
+    // cage rings: sections evenly spaced front to back, profile interpolated
+    this.secRings = []; this.secZ = [];
+    for (let i=0;i<S;i++){
+      const zf = 0.5 - i/(S-1);
+      const prof = profileAt(def, zf);
+      const hwB = W*0.5*prof.hw, hwT = hwB*0.8;
+      const yLow = prof.yLow + (def.rideBoost||0), yTop = prof.yTop;
+      const ring = ringPoints(P, hwB, hwT, yLow, yTop);
+      const ids = [];
+      for (let j=0;j<P;j++){
+        // mass by height: the floor/sill line carries a premium (real
+        // sills and floor pans are the heaviest structure, and the
+        // suspension links attach at the low nodes — a featherweight node
+        // there rings against the suspension stiffness), the roof stays
+        // light where the def asks for it, so the CG stays low
+        const hf = clamp((ring[j][1]-yLow)/Math.max(0.05, yTop-yLow), 0, 1);
+        // overhang taper: the nose and tail sections are lighter than
+        // the cabin (plastic bumpers, thin panels, empty overhang
+        // volume) — without it a heavy full-height tail (the SUV's)
+        // droops its rear floor to the road at fine resolutions
+        const endTaper = 1 - 0.3*Math.pow(Math.abs(zf)/0.5, 2);
+        ids.push(addNode(ring[j][0], ring[j][1], zf*L, lerp(1.3, topScale, hf) * endTaper, 'chassis'));
+      }
+      this.secRings.push(ids); this.secZ.push(zf);
+    }
+    const profF = profileAt(def, 0.5), profR = profileAt(def, -0.5);
+    // strut mounts get a fixed ~13 kg whatever the resolution: the tyre
+    // grip forces are applied partly at the mount (scaled by the load the
+    // wheel carries, not the mount's own mass), so a featherweight mount
+    // at high node counts turns that explicit velocity feedback into a
+    // resonance that shakes the car apart. ~13 kg (like the wheel itself)
+    // keeps the loop tame at every resolution. The bumpers get no such
+    // treatment — no force is applied at them, and 13 kg hanging off the
+    // soft nose cantilever just bends it toward the ground.
+    const avgCh = (def.mass - wheelMass*4)/((S*P) + 6);
+    const heavyW = 13/Math.max(1, avgCh);
+    this.frontBumper = addNode(0, profF.yMid*0.85, L*0.5+0.18, 1, 'chassis');
+    this.rearBumper  = addNode(0, profR.yMid*0.85, -L*0.5-0.18, 1, 'chassis');
     const wz = def.wheelBase*L*0.5, wx = W*0.5*def.trackW;
     // suspension mount (strut top) directly above each wheel — the vertical
     // beam from wheel to mount is what actually carries the car's weight
     this.mountIdx = [
-      addNode(-wx, def.wheelR+0.52,  wz, chassisMassEach, 'chassis'),
-      addNode( wx, def.wheelR+0.52,  wz, chassisMassEach, 'chassis'),
-      addNode(-wx, def.wheelR+0.52, -wz, chassisMassEach, 'chassis'),
-      addNode( wx, def.wheelR+0.52, -wz, chassisMassEach, 'chassis')
+      addNode(-wx, def.wheelR+0.52,  wz, heavyW, 'chassis'),
+      addNode( wx, def.wheelR+0.52,  wz, heavyW, 'chassis'),
+      addNode(-wx, def.wheelR+0.52, -wz, heavyW, 'chassis'),
+      addNode( wx, def.wheelR+0.52, -wz, heavyW, 'chassis')
     ];
     this.wheelIdx = [
-      addNode(-wx, def.wheelR,  wz, wheelMass, 'wheel'),
-      addNode( wx, def.wheelR,  wz, wheelMass, 'wheel'),
-      addNode(-wx, def.wheelR, -wz, wheelMass, 'wheel'),
-      addNode( wx, def.wheelR, -wz, wheelMass, 'wheel')
+      addNode(-wx, def.wheelR,  wz, 0, 'wheel'),
+      addNode( wx, def.wheelR,  wz, 0, 'wheel'),
+      addNode(-wx, def.wheelR, -wz, 0, 'wheel'),
+      addNode( wx, def.wheelR, -wz, 0, 'wheel')
     ];
     this.nodes = nodes;
-    // renormalize chassis masses so the total is exactly def.mass
+    // masses: wheels are a fixed 13 kg each; the rest of def.mass is spread
+    // over the chassis nodes by raw weight, total exactly def.mass
     {
-      let sum = 0; const target = def.mass - wheelMass * 4;
-      for (const n of nodes) if (n.kind === 'chassis') sum += n.mass;
-      const f = target / sum;
-      for (const n of nodes) if (n.kind === 'chassis') n.mass *= f;
+      let sum = 0; const targetCh = def.mass - wheelMass*4;
+      for (let i=0;i<nodes.length;i++) if (nodes[i].kind === 'chassis') sum += rawW[i];
+      const f = targetCh/sum;
+      for (let i=0;i<nodes.length;i++) nodes[i].mass = nodes[i].kind === 'wheel' ? wheelMass : rawW[i]*f;
     }
-    // beams: auto-connect chassis nodes within threshold (triangulated cage)
-    const beams = [], thr = Math.max(1.9, L*0.44); // threshold must reach the
-    // section-to-section DIAGONALS: with only straight longitudinal beams the
-    // cage has almost no torsional stiffness and the body twists in corners
-    // until a tall car trips over its own flex
-    const isWheel = i => nodes[i].kind==='wheel';
-    for (let i=0;i<nodes.length;i++){
-      if (isWheel(i)) continue;
-      for (let j=i+1;j<nodes.length;j++){
-        if (isWheel(j)) continue;
-        const A = nodes[i].rest, B = nodes[j].rest;
-        const dx=B.x-A.x, dy=B.y-A.y, dz=B.z-A.z, d = Math.sqrt(dx*dx+dy*dy+dz*dz);
-        if (d <= thr && d > 0.35){ // pairs closer than 0.35 m are near-duplicate
-          // nodes: a beam there sees enormous strain from tiny displacements
-          // and snaps under ordinary driving loads (the bumper-link bug)
-          const rm = 2*nodes[i].mass*nodes[j].mass/(nodes[i].mass+nodes[j].mass);
-          // crumple zones: beams touching the front/rear sections or bumpers
-          // are softer and break earlier — that is where a car is meant to fold.
-          // Mostly-vertical beams keep full stiffness: they carry the overhang's
-          // weight and must not let the nose droop; crush in a crash is
-          // longitudinal, so softening only the flat beams keeps the crumple.
-          const crumple = (idx)=> (idx < 8 || (idx >= 24 && idx <= 33));
-          const isCr = (crumple(i) || crumple(j)) && Math.abs(B.y-A.y)/d < 0.5;
-          const k = def.stiff * clamp(1.15 - d*0.12, 0.7, 1.15) * (isCr ? 0.28 : 1);
-          beams.push(new Beam(i, j, d, { k:k, c:0.12*2*Math.sqrt(k*rm),
-            deformStrain:(isCr ? 0.06 : 0.10),
-            breakStrain:(isCr ? 0.19 + hashN(i*31+j*17)*0.06 : 0.34 + hashN(i*31+j*17)*0.08) }));
-        }
+    // frame reference: topmost / bottommost ring nodes of the second
+    // section (ties on the flat top/bottom edges break toward the centre)
+    {
+      const ids = this.secRings[Math.min(1, S-1)];
+      let top = ids[0], bot = ids[0], topKey = -1e9, botKey = 1e9;
+      for (const id of ids){
+        const r = nodes[id].rest;
+        const tk = r.y - Math.abs(r.x)*0.05, bk = r.y + Math.abs(r.x)*0.05;
+        if (tk > topKey){ topKey = tk; top = id; }
+        if (bk < botKey){ botKey = bk; bot = id; }
       }
+      this.frameTopIdx = top; this.frameFloorIdx = bot;
     }
-    // explicit bumper rails: bumpers get stiff, non-crumple beams to the
-    // nearest section. On auto-beams alone the bumper hangs off long soft
-    // diagonals, starts swinging under driving vibration, the plastic
-    // ratchet feeds the swing, and the front clip gets tossed at speed.
-    for (const [bi, sec] of [[this.frontBumper, s0],[this.rearBumper, s3]]){
-      for (const ti of [sec.lowL, sec.lowR, sec.midL, sec.midR]){
-        const A = nodes[bi].rest, B = nodes[ti].rest;
-        const dx=B.x-A.x, dy=B.y-A.y, dz=B.z-A.z, d = Math.sqrt(dx*dx+dy*dy+dz*dz);
-        const rm = 2*nodes[bi].mass*nodes[ti].mass/(nodes[bi].mass+nodes[ti].mass);
-        const k = def.stiff * 0.85;
-        beams.push(new Beam(bi, ti, d, { k:k, c:0.15*2*Math.sqrt(k*rm),
-          deformStrain:0.09, breakStrain:0.30 }));
+    // resolution stiffness scale: in a finer grid each beam is a thinner
+    // slice of the same shell, so per-beam stiffness scales down with the
+    // node count — faster than 1/count, because the grid's beams also get
+    // SHORTER as sections multiply (the length falloff pushes short beams
+    // toward the stiff end) while each node's mass falls with the count.
+    // Two per-car factors normalize across the fleet (the sedan is the
+    // reference for both): sqrt(272000/stiff), because the stiffest car
+    // on the shortest beams would otherwise sit past the 480 Hz stability
+    // edge even at base resolution; and the car's mass ratio, blended in
+    // as resolution rises — a heavier car's nodes are proportionally
+    // heavier at the same target, so it can (and must, or its floor sags
+    // to the road under its own weight) carry proportionally stiffer
+    // beams at the same sum-k / node-mass. The strut spring is NOT
+    // scaled: a spring rate is a property of the car, and the 13 kg
+    // wheel and mount masses keep that loop stable.
+    const massBlend = clamp((target - RES_TARGET_DEFAULT)/350, 0, 1);
+    // past Ultra the exponent eases back (1.15 -> 0.80 at 1000): the
+    // beam subcycle's stability margin is spent on holding the shell's
+    // stiffness roughly constant instead, because at the plain eased
+    // rate the 1000-node shell sags until its floor drags and the car
+    // can barely move. At and below 500 nothing changes.
+    const resExp = 1.15 - 0.50 * clamp((target - 500)/500, 0, 1);
+    const resK = Math.pow(RES_TARGET_DEFAULT/Math.max(RES_TARGET_DEFAULT, target), resExp) *
+      Math.sqrt(272000/def.stiff) * Math.pow((def.mass - 52)/(1320 - 52), massBlend);
+    /* ---- beams (structured only — no distance-threshold auto-connect) ---- */
+    const beams = [];
+    const nodeSec = new Array(nodes.length).fill(-1);
+    this.secRings.forEach((ids, i)=>{ for (const id of ids) nodeSec[id] = i; });
+    const isEnd = id => nodeSec[id]===0 || nodeSec[id]===S-1 ||
+                        id===this.frontBumper || id===this.rearBumper;
+    const addBeam = (a, b, lng)=>{
+      if (a < 0 || b < 0 || a === b) return;
+      const A = nodes[a].rest, B = nodes[b].rest;
+      const dx=B.x-A.x, dy=B.y-A.y, dz=B.z-A.z, d = Math.sqrt(dx*dx+dy*dy+dz*dz);
+      if (d < 1e-6) return;
+      const rm = 2*nodes[a].mass*nodes[b].mass/(nodes[a].mass+nodes[b].mass);
+      // crumple zones: beams touching the front/rear sections or bumpers
+      // are softer and break earlier — that is where a car is meant to fold.
+      // Mostly-vertical beams keep full stiffness: they carry the overhang's
+      // weight and must not let the nose droop; crush in a crash is
+      // longitudinal, so softening only the flat beams keeps the crumple.
+      const isCr = (isEnd(a) || isEnd(b)) && Math.abs(dy)/d < 0.5;
+      // longitudinal lines are SERIES chains of (S-1) beams: the whole
+      // line's axial/bending stiffness is k/(S-1), so per-beam k must grow
+      // with the section count to keep the tube's bending stiffness (and
+      // the overhangs' ride height) the same at every resolution
+      const kLng = lng===true ? Math.min(4.5, Math.pow((S-1)/13, 0.7)) : (typeof lng==='number' ? lng : 1);
+      const k = def.stiff * clamp(1.15 - d*0.12, 0.7, 1.15) * (isCr ? 0.28 : 1) * resK * kLng;
+      beams.push(new Beam(a, b, d, { k:k, c:(target > RES_TARGET_DEFAULT ? 0.09 : 0.12)*2*Math.sqrt(k*rm),
+        deformStrain:(isCr ? 0.06 : 0.10),
+        breakStrain:(isCr ? 0.19 + hashN(a*31+b*17)*0.06 : 0.34 + hashN(a*31+b*17)*0.08) }));
+    };
+    // ring beams: around each section, plus skip-one chords. The chords
+    // triangulate the ring in its own plane: a bare polygon of edge beams
+    // keeps every beam length yet folds at its joints (a mechanism, not a
+    // structure), and X-braced panels cannot stop every ring folding the
+    // same way at once. With chords, each ring is a chain of rigid
+    // triangles and the cross-section holds its shape.
+    for (let i=0;i<S;i++) for (let j=0;j<P;j++){
+      addBeam(this.secRings[i][j], this.secRings[i][(j+1)%P]);
+      addBeam(this.secRings[i][j], this.secRings[i][(j+2)%P]);
+    }
+    // longitudinal beams: matching ring nodes, section to section
+    for (let i=0;i<S-1;i++) for (let j=0;j<P;j++)
+      addBeam(this.secRings[i][j], this.secRings[i+1][j], true);
+    // skip-one longitudinals (high resolutions only): a second chord
+    // family two sections apart, in parallel with the first. Tube
+    // bending — the overhang droop and mid-span sag that otherwise put
+    // the floor on the road at fine resolutions, where per-beam rates
+    // must fall for integration stability — is resisted by the chords'
+    // axial stiffness, and parallel paths add stiffness without raising
+    // any single beam's rate. Half the series factor: the family has
+    // half as many springs in series per unit length.
+    if (target > RES_TARGET_DEFAULT){
+      const kSkip = Math.min(4.5, Math.pow((S-1)/13, 0.7)) * 0.5;
+      for (let i=0;i<S-2;i++) for (let j=0;j<P;j++)
+        addBeam(this.secRings[i][j], this.secRings[i+2][j], kSkip);
+      const kSkip2 = Math.min(4.5, Math.pow((S-1)/13, 0.7)) * 0.35;
+      for (let i=0;i<S-3;i++) for (let j=0;j<P;j++)
+        addBeam(this.secRings[i][j], this.secRings[i+3][j], kSkip2);
+    }
+    // panel diagonals, one per quad, alternating direction: a spring
+    // strut resists shear both ways (it pushes as well as pulls), so one
+    // diagonal braces each panel; alternating averages out any
+    // directional bias. Together with the longitudinal beams this gives
+    // the tube its torsional stiffness, so a tall car does not twist
+    // itself over in corners.
+    for (let i=0;i<S-1;i++) for (let j=0;j<P;j++){
+      if ((i+j)%2 === 0) addBeam(this.secRings[i][j], this.secRings[i+1][(j+1)%P]);
+      else addBeam(this.secRings[i][(j+1)%P], this.secRings[i+1][j]);
+    }
+    // ring-node pickers: 'low' = lowest node on one side, 'mid' = the side
+    // node closest to a reference height
+    const ringSide = (ids, sx, yRef, mode)=>{
+      let best = -1, bestKey = 1e9;
+      for (const id of ids){
+        const r = nodes[id].rest;
+        if (Math.abs(r.x) < 1e-6 || Math.sign(r.x) !== sx) continue;
+        const key = mode === 'low' ? r.y*1000 - Math.abs(r.x) : Math.abs(r.y - yRef);
+        if (key < bestKey){ bestKey = key; best = id; }
       }
+      return best;
+    };
+    // explicit bumper rails: stiff beams from each bumper to the end
+    // section's low/mid side nodes. A bumper hanging off soft diagonals
+    // alone starts swinging under driving vibration, the plastic ratchet
+    // feeds the swing, and the front clip gets tossed at speed.
+    const addRail = (a, b)=>{
+      if (a < 0 || b < 0) return;
+      const A = nodes[a].rest, B = nodes[b].rest;
+      const dx=B.x-A.x, dy=B.y-A.y, dz=B.z-A.z, d = Math.sqrt(dx*dx+dy*dy+dz*dz);
+      if (d < 1e-6) return;
+      const rm = 2*nodes[a].mass*nodes[b].mass/(nodes[a].mass+nodes[b].mass);
+      const k = def.stiff * 0.85 * resK;
+      beams.push(new Beam(a, b, d, { k:k, c:0.15*2*Math.sqrt(k*rm),
+        deformStrain:0.09, breakStrain:0.30 }));
+    };
+    for (const sx of [-1,1]){
+      addRail(this.frontBumper, ringSide(this.secRings[0], sx, 0, 'low'));
+      addRail(this.frontBumper, ringSide(this.secRings[0], sx, profF.yMid, 'mid'));
+      addRail(this.rearBumper, ringSide(this.secRings[S-1], sx, 0, 'low'));
+      addRail(this.rearBumper, ringSide(this.secRings[S-1], sx, profR.yMid, 'mid'));
     }
-    // suspension beams: each wheel to nearby chassis nodes
-    const suspTargets = [
-      [this.mountIdx[0], this.secIdx[0].lowL, this.secIdx[1].lowL, this.secIdx[1].midL, this.secIdx[1].lowR, this.secIdx[0].lowR],
-      [this.mountIdx[1], this.secIdx[0].lowR, this.secIdx[1].lowR, this.secIdx[1].midR, this.secIdx[1].lowL, this.secIdx[0].lowL],
-      [this.mountIdx[2], this.secIdx[3].lowL, this.secIdx[2].lowL, this.secIdx[2].midL, this.secIdx[2].lowR, this.secIdx[3].lowR],
-      [this.mountIdx[3], this.secIdx[3].lowR, this.secIdx[2].lowR, this.secIdx[2].midR, this.secIdx[2].lowL, this.secIdx[3].lowL]
-    ];
-    // (the last two targets of each wheel are cross-car track bars: without a
-    // stiff lateral link, a steered wheel just slides sideways in its soft
-    // longitudinal mounts and the chassis never receives the cornering force)
+    // the anchor sections for a wheel at z-fraction zf: sections about
+    // half a metre away on either side (but never closer than the
+    // bracketing sections). At high section counts the bracketing
+    // sections sit centimetres from the wheel plane, so links to them
+    // are stubby pins with no leverage: the wheel swings on its strut
+    // until the links bind, and the car ends up parked on its floor
+    // with the wheels tucked. The original cage's anchors were spread
+    // wide for a reason; at low section counts the bracketing sections
+    // already are.
+    const anchorSecs = (zf)=>{
+      const spacingZF = S > 1 ? (this.secZ[S-1] - this.secZ[0])/(S-1) : 0;
+      const off = Math.max(spacingZF, 0.11);
+      const near = (t)=>{ let bi = 0, bd = 1e9;
+        for (let i=0;i<S;i++){ const d = Math.abs(this.secZ[i]-t); if (d < bd){ bd = d; bi = i; } }
+        return bi; };
+      let a = near(zf + off), b = near(zf - off);
+      if (a === b){ if (b < S-1) b = a+1; else a = b-1; }
+      return [a, b];
+    };
+    // mount links: tie each strut mount into the cage around its wheel.
+    // Three lessons are baked into this web:
+    //  - wide anchors: the links go to the anchorSecs sections (~±0.8 m
+    //    away), not the bracketing ones — near-vertical links barely
+    //    locate the mount along the car, where the strut load gives the
+    //    perch a toppling (negative) stiffness.
+    //  - anchors above AND below: with every anchor below, the perch is
+    //    a flagpole and the spawn drop yanks the mount off the strut.
+    //  - a hardpoint rate floor: the soft mode of the whole suspension
+    //    is the cage sinking on mounts that slide along their strut
+    //    orbit — a mode the strut itself cannot resist (on-orbit motion
+    //    keeps its length), so only these links resist it, and at plain
+    //    resK rates the body sinks until the floor props it up. The
+    //    links therefore keep at least half the base rate whatever the
+    //    resolution (the mount end is a heavy 13 kg node, so the stiffer
+    //    link does not endanger the integration).
+    const addMountLink = (a, b)=>{
+      if (a < 0 || b < 0) return;
+      const A = nodes[a].rest, B = nodes[b].rest;
+      const dx=B.x-A.x, dy=B.y-A.y, dz=B.z-A.z, d = Math.sqrt(dx*dx+dy*dy+dz*dz);
+      if (d < 1e-6) return;
+      const rm = 2*nodes[a].mass*nodes[b].mass/(nodes[a].mass+nodes[b].mass);
+      const k = def.stiff * clamp(1.15 - d*0.12, 0.7, 1.15) * Math.max(resK, 0.42);
+      beams.push(new Beam(a, b, d, { k:k, c:0.15*2*Math.sqrt(k*rm),
+        deformStrain:0.10, breakStrain:0.38 }));
+    };
+    for (let w=0; w<4; w++){
+      const sx = (w%2 === 0) ? -1 : 1;
+      const zf = (w < 2 ? 1 : -1) * def.wheelBase * 0.5;
+      const br = anchorSecs(zf), ia = br[0], ib = br[1];
+      const profA = profileAt(def, this.secZ[ia]), profB = profileAt(def, this.secZ[ib]);
+      addMountLink(this.mountIdx[w], ringSide(this.secRings[ia], sx, 0, 'low'));
+      addMountLink(this.mountIdx[w], ringSide(this.secRings[ia], sx, profA.yMid, 'mid'));
+      addMountLink(this.mountIdx[w], ringSide(this.secRings[ia], sx, profA.yTop*0.85, 'mid'));
+      addMountLink(this.mountIdx[w], ringSide(this.secRings[ib], sx, 0, 'low'));
+      addMountLink(this.mountIdx[w], ringSide(this.secRings[ib], sx, profB.yMid, 'mid'));
+      addMountLink(this.mountIdx[w], ringSide(this.secRings[ib], sx, profB.yTop*0.85, 'mid'));
+    }
+    // suspension beams: each wheel to its mount (the strut — first target,
+    // ×1.8 stiffness — is what carries the car's weight) plus links to the
+    // bracketing sections' low/mid ring nodes. The last two targets of each
+    // wheel are cross-car links: without a stiff lateral link, a steered
+    // wheel just slides sideways in its soft longitudinal mounts and the
+    // chassis never receives the cornering force.
     this.strutBeam = [];
     this.wheelIdx.forEach((wi, w)=>{
-      suspTargets[w].forEach((ti, tiIdx)=>{
+      const sx = (w%2 === 0) ? -1 : 1;
+      const zf = (w < 2 ? 1 : -1) * def.wheelBase * 0.5;
+      const br = anchorSecs(zf), ia = br[0], ib = br[1];
+      const profB = profileAt(def, this.secZ[ib]);
+      const targets = [
+        this.mountIdx[w],
+        ringSide(this.secRings[ia], sx, 0, 'low'),
+        ringSide(this.secRings[ib], sx, 0, 'low'),
+        ringSide(this.secRings[ib], sx, profB.yMid, 'mid'),
+        ringSide(this.secRings[ib], -sx, 0, 'low'),
+        ringSide(this.secRings[ia], -sx, 0, 'low')
+      ];
+      targets.forEach((ti, tiIdx)=>{
+        if (ti < 0) return;
         const A = nodes[wi].rest, B = nodes[ti].rest;
         const dx=B.x-A.x, dy=B.y-A.y, dz=B.z-A.z, d = Math.sqrt(dx*dx+dy*dy+dz*dz);
+        if (d < 1e-6) return;
         const rm = 2*nodes[wi].mass*nodes[ti].mass/(nodes[wi].mass+nodes[ti].mass);
-        const kk = def.suspK * (tiIdx===0 ? 1.8 : 1); // first target = vertical strut
+        // first target = vertical strut at full rate; the links soften
+        // mildly with resolution (sqrt of the cage scale): full-rate links
+        // into the lightest ring nodes measurably ring at high counts
+        const kk = def.suspK * (tiIdx===0 ? 1.8 : Math.sqrt(resK));
         if (tiIdx===0) this.strutBeam[w] = beams.length;
         beams.push(new Beam(wi, ti, d, { k:kk, c:0.7*2*Math.sqrt(kk*rm),
           deformStrain:0.3, breakStrain:0.75, suspension:true }));
       });
     });
     this.beams = beams;
-    this.frontNodes = [this.frontBumper, s0.lowL, s0.lowR, s0.midL, s0.midR];
-    this.rearNodes = [this.rearBumper, s3.lowL, s3.lowR, s3.midL, s3.midR];
+    // nose reference for crash measurement: bottom-centre node of the
+    // section nearest z = +0.17L — the same physical gauge depth the
+    // original cage's section-1 reference gave, at every resolution
+    {
+      let bi = 0, bd = 1e9;
+      for (let i=0;i<S;i++){ const dd = Math.abs(this.secZ[i] - 0.17); if (dd < bd){ bd = dd; bi = i; } }
+      this.noseRefIdx = this.secRings[bi][0];
+    }
+    const lowHalf = (ids, yMid)=>{
+      const out = [];
+      for (const id of ids) if (nodes[id].rest.y <= yMid + 0.02) out.push(id);
+      return out;
+    };
+    this.frontNodes = [this.frontBumper].concat(lowHalf(this.secRings[0], profF.yMid));
+    this.rearNodes = [this.rearBumper].concat(lowHalf(this.secRings[S-1], profR.yMid));
   }
   /* pose helpers */
   setPoseFrame(cx, cy, cz, right, up, fwd, vx, vy, vz){
@@ -501,7 +918,7 @@ class SoftBodyCar {
     const F = this.nodes[this.frontBumper].pos, R = this.nodes[this.rearBumper].pos;
     let fx = F.x-R.x, fy = F.y-R.y, fz = F.z-R.z;
     let fl = Math.sqrt(fx*fx+fy*fy+fz*fz)||1; fx/=fl; fy/=fl; fz/=fl;
-    const T = this.nodes[this.secIdx[1].topC].pos, B = this.nodes[this.secIdx[1].floorC].pos;
+    const T = this.nodes[this.frameTopIdx].pos, B = this.nodes[this.frameFloorIdx].pos;
     let ux = T.x-B.x, uy = T.y-B.y, uz = T.z-B.z;
     // right = up0 x fwd ; then true up = fwd x right
     let rx = uy*fz-uz*fy, ry = uz*fx-ux*fz, rz = ux*fy-uy*fx;
@@ -557,23 +974,33 @@ class SoftBodyCar {
     if (this.throttleSm === undefined) this.throttleSm = 0;
     const thrT = clamp(input.throttle||0, 0, 1);
     this.throttleSm += clamp(thrT - this.throttleSm, -3.5*h, 3.5*h);
-    // forces
+    // external forces (gravity here; tyre and aero forces join below).
+    // The beam forces are added separately, inside the integration loop:
+    // at high node counts the cage's stiffest nodal modes sit close to
+    // the 480 Hz explicit-integration edge, so the beams are subcycled —
+    // evaluated and integrated twice per substep — which buys a real
+    // stability margin without changing the step the world, tyres and
+    // contacts see, and without softening the structure.
     const F = new Array(nodes.length);
     for (let i=0;i<nodes.length;i++) F[i] = { x:0, y:-9.81*nodes[i].mass, z:0 };
-    // beams
-    for (const b of this.beams){
-      if (b.broken) continue;
-      const A = nodes[b.a], B = nodes[b.b];
-      const dx = B.pos.x-A.pos.x, dy = B.pos.y-A.pos.y, dz = B.pos.z-A.pos.z;
-      const L = Math.sqrt(dx*dx+dy*dy+dz*dz); if (L < 1e-6) continue;
-      const ux = dx/L, uy = dy/L, uz = dz/L;
-      const rvx = B.vel.x-A.vel.x, rvy = B.vel.y-A.vel.y, rvz = B.vel.z-A.vel.z;
-      const rel = rvx*ux + rvy*uy + rvz*uz;
-      const f = b.k*(L - b.currentRest) + b.c*rel;
-      F[b.a].x += ux*f; F[b.a].y += uy*f; F[b.a].z += uz*f;
-      F[b.b].x -= ux*f; F[b.b].y -= uy*f; F[b.b].z -= uz*f;
-      if (!this.noDeform) b.checkDeform(nodes, h);
-    }
+    const sub2N = this.targetNodes > 500 ? 3 : (this.targetNodes > RES_TARGET_DEFAULT ? 2 : 1);
+    if (!this._Fs || this._Fs.length !== nodes.length)
+      this._Fs = nodes.map(()=>({ x:0, y:0, z:0 }));
+    const addBeamForces = (Ft, doDeform)=>{
+      for (const b of this.beams){
+        if (b.broken) continue;
+        const A = nodes[b.a], B = nodes[b.b];
+        const dx = B.pos.x-A.pos.x, dy = B.pos.y-A.pos.y, dz = B.pos.z-A.pos.z;
+        const L = Math.sqrt(dx*dx+dy*dy+dz*dz); if (L < 1e-6) continue;
+        const ux = dx/L, uy = dy/L, uz = dz/L;
+        const rvx = B.vel.x-A.vel.x, rvy = B.vel.y-A.vel.y, rvz = B.vel.z-A.vel.z;
+        const rel = rvx*ux + rvy*uy + rvz*uz;
+        const f = b.k*(L - b.currentRest) + b.c*rel;
+        Ft[b.a].x += ux*f; Ft[b.a].y += uy*f; Ft[b.a].z += uz*f;
+        Ft[b.b].x -= ux*f; Ft[b.b].y -= uy*f; Ft[b.b].z -= uz*f;
+        if (doDeform && !this.noDeform) b.checkDeform(nodes, h);
+      }
+    };
     // (No anti-roll-bar coupling: an undamped differential spring between
     // the struts resonated with the wheel-hop mode and made tall cars MORE
     // likely to roll, not less. Roll stiffness comes from the struts and
@@ -622,7 +1049,24 @@ class SoftBodyCar {
       // starves the chassis of yaw damping (fishtailing)
       F[wi].x += gx*0.4; F[wi].y += gy*0.4; F[wi].z += gz*0.4;
       const mi = this.mountIdx[w];
-      F[mi].x += gx*0.6; F[mi].y += gy*0.6; F[mi].z += gz*0.6;
+      if (this.targetNodes > RES_TARGET_DEFAULT){
+        // high-resolution cages hold their mounts more softly, and the
+        // cross-coupled loop (force from the WHEEL's velocity applied at
+        // the MOUNT, one substep of lag) rings there. The mount's share
+        // instead damps the mount's own lateral velocity — the same force
+        // in steady cornering (wheel and mount velocities agree), but a
+        // pure damper, not a feedback loop, in transients.
+        const mn = nodes[mi];
+        const mLatX = mn.vel.x - dx*(mn.vel.x*dx+mn.vel.y*dy+mn.vel.z*dz) - gh.normal.x*(mn.vel.x*gh.normal.x+mn.vel.y*gh.normal.y+mn.vel.z*gh.normal.z);
+        const mLatY = mn.vel.y - dy*(mn.vel.x*dx+mn.vel.y*dy+mn.vel.z*dz) - gh.normal.y*(mn.vel.x*gh.normal.x+mn.vel.y*gh.normal.y+mn.vel.z*gh.normal.z);
+        const mLatZ = mn.vel.z - dz*(mn.vel.x*dx+mn.vel.y*dy+mn.vel.z*dz) - gh.normal.z*(mn.vel.x*gh.normal.x+mn.vel.y*gh.normal.y+mn.vel.z*gh.normal.z);
+        let mx = -mLatX*loadMass*gripRate, my = -mLatY*loadMass*gripRate, mz = -mLatZ*loadMass*gripRate;
+        const ml = Math.sqrt(mx*mx+my*my+mz*mz);
+        if (ml > gCap && ml > 0){ const sc = gCap/ml; mx*=sc; my*=sc; mz*=sc; }
+        F[mi].x += mx*0.6; F[mi].y += my*0.6; F[mi].z += mz*0.6;
+      } else {
+        F[mi].x += gx*0.6; F[mi].y += gy*0.6; F[mi].z += gz*0.6;
+      }
       // longitudinal
       const vF = n.vel.x*dx + n.vel.y*dy + n.vel.z*dz;
       const nDriven = def.drive==='4WD'?4:2;
@@ -670,14 +1114,23 @@ class SoftBodyCar {
       const dragA = def.drag * spd; // accel per unit velocity
       for (let i=0;i<nodes.length;i++){ F[i].x -= cv.x*dragA*nodes[i].mass; F[i].y -= cv.y*dragA*nodes[i].mass*0.3; F[i].z -= cv.z*dragA*nodes[i].mass; }
     }
-    // integrate
-    for (let i=0;i<nodes.length;i++){
-      const n = nodes[i], im = h/n.mass;
-      n.vel.x += F[i].x*im; n.vel.y += F[i].y*im; n.vel.z += F[i].z*im;
-      // safety clamp: the sim must never explode
-      const sv = Math.sqrt(n.vel.x*n.vel.x+n.vel.y*n.vel.y+n.vel.z*n.vel.z);
-      if (sv > 90){ const sc = 90/sv; n.vel.x*=sc; n.vel.y*=sc; n.vel.z*=sc; }
-      n.pos.x += n.vel.x*h; n.pos.y += n.vel.y*h; n.pos.z += n.vel.z*h;
+    // integrate (beam forces subcycled at high resolution — see above)
+    const hh = h/sub2N;
+    for (let s2=0; s2<sub2N; s2++){
+      let Ft = F;
+      if (sub2N > 1){
+        Ft = this._Fs;
+        for (let i=0;i<nodes.length;i++){ Ft[i].x = F[i].x; Ft[i].y = F[i].y; Ft[i].z = F[i].z; }
+      }
+      addBeamForces(Ft, s2 === sub2N-1);
+      for (let i=0;i<nodes.length;i++){
+        const n = nodes[i], im = hh/n.mass;
+        n.vel.x += Ft[i].x*im; n.vel.y += Ft[i].y*im; n.vel.z += Ft[i].z*im;
+        // safety clamp: the sim must never explode
+        const sv = Math.sqrt(n.vel.x*n.vel.x+n.vel.y*n.vel.y+n.vel.z*n.vel.z);
+        if (sv > 90){ const sc = 90/sv; n.vel.x*=sc; n.vel.y*=sc; n.vel.z*=sc; }
+        n.pos.x += n.vel.x*hh; n.pos.y += n.vel.y*hh; n.pos.z += n.vel.z*hh;
+      }
     }
     // collisions
     for (let i=0;i<nodes.length;i++){
@@ -725,20 +1178,32 @@ class SoftBodyCar {
 }
 function spawnCar(defId, world, s){
   const def = CAR_DEFS.find(d=>d.id===defId) || CAR_DEFS[0];
-  const car = new SoftBodyCar(def, world);
+  const defIndex = CAR_DEFS.indexOf(def);
+  const car = new SoftBodyCar(def, world, carRes[defIndex]);
   car.placeOnTrack(world, (s===undefined?100:s), 0);
   // pre-settle the suspension with damage recording off, so a freshly
-  // spawned car is at equilibrium with a genuinely untouched structure
+  // spawned car is at equilibrium with a genuinely untouched structure.
+  // The settle is QUASI-STATIC: velocities are zeroed every few steps so
+  // the car sinks onto its springs in small increments instead of
+  // dropping with kinetic energy. A free drop at high node counts knocks
+  // the strut mounts off their perches (they end up resting on the
+  // ground with the floor dragged down); the same structure is perfectly
+  // stable when it arrives at equilibrium gently.
   car.noDeform = true;
   const idle = { throttle:0, reverse:0, brake:0, steer:0, handbrake:0 };
-  for (let i=0;i<90;i++) car.step(1/60, idle, world);
+  for (let i=0;i<150;i++){
+    car.step(1/60, idle, world);
+    if (i%6 === 5) car.setVelocity(0,0,0);
+  }
   car.noDeform = false;
   car.setVelocity(0,0,0);
   return car;
 }
 if (typeof globalThis !== 'undefined'){
   globalThis.__SIM = { TrackWorld:TrackWorld, SoftBodyCar:SoftBodyCar, Beam:Beam, CAR_DEFS:CAR_DEFS,
-    spawnCar:spawnCar, ROAD_HALF:ROAD_HALF, CLIFF_FIRST:CLIFF_FIRST, CLIFF_PERIOD:CLIFF_PERIOD, CLIFF_LEN:CLIFF_LEN };
+    spawnCar:spawnCar, ROAD_HALF:ROAD_HALF, CLIFF_FIRST:CLIFF_FIRST, CLIFF_PERIOD:CLIFF_PERIOD, CLIFF_LEN:CLIFF_LEN,
+    RES_TARGET_DEFAULT:RES_TARGET_DEFAULT, resNameFor:resNameFor, profileAt:profileAt,
+    chooseGrid:chooseGrid, ringPoints:ringPoints, carRes:carRes, BARRIER_LAT:BARRIER_LAT };
 }
 // === SIM CORE END ===
 </script>
@@ -765,11 +1230,36 @@ window.addEventListener('resize', ()=>{
 });
 
 /* ---------- geometry bucket builder (car-local coords) ---------- */
-function Bucket(){ this.pos = []; this.nor = []; }
+// Body detail scaling: ONE master body plan per car (buildBuckets); its
+// triangle density scales with the car's node target via quad subdivision.
+// subdiv 1 is the floor — exactly the density the body was designed at, so
+// a 150-node car still shows the full multi-part model; at 1000 nodes the
+// same plan renders at subdiv 6 and the skin can follow the fine cage's
+// deformation in much smaller facets. Faces are planar, so bilinear
+// interpolation of the corners is exact and normals stay the face normal.
+function subdivForTarget(target){
+  return Math.max(1, Math.min(6, Math.round(1 + (target - 150)/850*5)));
+}
+function Bucket(subdiv){ this.pos = []; this.nor = []; this.subdiv = Math.max(1, subdiv||1); }
 Bucket.prototype.quad = function(a,b,c,d,n){
-  const p = this.pos, nr = this.nor;
-  p.push(a[0],a[1],a[2], b[0],b[1],b[2], c[0],c[1],c[2], a[0],a[1],a[2], c[0],c[1],c[2], d[0],d[1],d[2]);
-  for (let i=0;i<6;i++) nr.push(n[0],n[1],n[2]);
+  const p = this.pos, nr = this.nor, sd = this.subdiv;
+  if (sd <= 1){
+    p.push(a[0],a[1],a[2], b[0],b[1],b[2], c[0],c[1],c[2], a[0],a[1],a[2], c[0],c[1],c[2], d[0],d[1],d[2]);
+    for (let i=0;i<6;i++) nr.push(n[0],n[1],n[2]);
+    return;
+  }
+  const pt = (u,v)=>{
+    const abx=a[0]+(b[0]-a[0])*u, aby=a[1]+(b[1]-a[1])*u, abz=a[2]+(b[2]-a[2])*u;
+    const dcx=d[0]+(c[0]-d[0])*u, dcy=d[1]+(c[1]-d[1])*u, dcz=d[2]+(c[2]-d[2])*u;
+    return [abx+(dcx-abx)*v, aby+(dcy-aby)*v, abz+(dcz-abz)*v];
+  };
+  for (let i=0;i<sd;i++) for (let j=0;j<sd;j++){
+    const u0=i/sd, u1=(i+1)/sd, v0=j/sd, v1=(j+1)/sd;
+    const q00=pt(u0,v0), q10=pt(u1,v0), q11=pt(u1,v1), q01=pt(u0,v1);
+    p.push(q00[0],q00[1],q00[2], q10[0],q10[1],q10[2], q11[0],q11[1],q11[2],
+           q00[0],q00[1],q00[2], q11[0],q11[1],q11[2], q01[0],q01[1],q01[2]);
+    for (let k=0;k<6;k++) nr.push(n[0],n[1],n[2]);
+  }
 };
 Bucket.prototype.prism = function(zF, zB, wF, wB, yBotF, yBotB, yTopF, yTopB, xF, xB){
   xF = xF||0; xB = xB||0;
@@ -787,9 +1277,9 @@ Bucket.prototype.box = function(cx,cy,cz,sx,sy,sz){
 };
 
 /* ---------- car body plan per type ---------- */
-function buildBuckets(def){
-  const B = { paint:new Bucket(), accent:new Bucket(), glass:new Bucket(),
-              lightF:new Bucket(), lightR:new Bucket(), dark:new Bucket() };
+function buildBuckets(def, subdiv){
+  const B = { paint:new Bucket(subdiv), accent:new Bucket(subdiv), glass:new Bucket(subdiv),
+              lightF:new Bucket(subdiv), lightR:new Bucket(subdiv), dark:new Bucket(subdiv) };
   const L = def.length, W = def.width, sec = def.sections;
   const zS = i => sec[i].z*L;
   const cabTop = sec[1].yTop, hoodTop = sec[0].yTop, rearTop = sec[3].yTop;
@@ -866,7 +1356,7 @@ function buildCarMeshes(){
   skinParts = []; wheelMeshes = [];
   carGroup = new THREE.Group(); scene.add(carGroup);
   makeMats(carDef);
-  const buckets = buildBuckets(carDef);
+  const buckets = buildBuckets(carDef, subdivForTarget(car.targetNodes));
   const nodes = car.nodes;
   for (const key of Object.keys(buckets)){
     const bk = buckets[key], n = bk.pos.length/3;
@@ -874,12 +1364,24 @@ function buildCarMeshes(){
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(bk.pos), 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(bk.nor), 3));
-    // anchors: 3 nearest nodes per vertex, offset in car-local coords
+    // anchors: 3 nearest nodes per vertex, offset in car-local coords.
+    // Single-pass top-3 over the non-wheel nodes (wheels never win for
+    // body panels): the old map+sort per vertex was O(N log N) and made
+    // 1000-node / subdiv-6 spawns take seconds.
     const anchors = [];
     for (let v=0; v<n; v++){
       const vx = bk.pos[v*3], vy = bk.pos[v*3+1], vz = bk.pos[v*3+2];
-      const ds = nodes.map((nd,i)=>{ const dx=vx-nd.rest.x, dy=vy-nd.rest.y, dz=vz-nd.rest.z;
-        return [dx*dx+dy*dy+dz*dz, i]; }).sort((a,b)=>a[0]-b[0]).slice(0,3);
+      let d0=1e18, d1=1e18, d2=1e18, i0=-1, i1=-1, i2=-1;
+      for (let i=0; i<nodes.length; i++){
+        const nd = nodes[i];
+        if (nd.kind === 'wheel') continue;
+        const dx=vx-nd.rest.x, dy=vy-nd.rest.y, dz=vz-nd.rest.z;
+        const dd = dx*dx+dy*dy+dz*dz;
+        if (dd < d0){ d2=d1; i2=i1; d1=d0; i1=i0; d0=dd; i0=i; }
+        else if (dd < d1){ d2=d1; i2=i1; d1=dd; i1=i; }
+        else if (dd < d2){ d2=dd; i2=i; }
+      }
+      const ds = [[d0,i0],[d1,i1],[d2,i2]];
       const ws = ds.map(d=>1/(Math.sqrt(d[0])+0.05)); const sum = ws[0]+ws[1]+ws[2];
       anchors.push(ds.map((d,k)=>({ i:d[1], w:ws[k]/sum,
         ox:vx-nodes[d[1]].rest.x, oy:vy-nodes[d[1]].rest.y, oz:vz-nodes[d[1]].rest.z })));
@@ -1004,24 +1506,124 @@ function updateDebug(){
 /* ============================ WORLD RENDERING ============================ */
 const CHUNK = 60;
 const LATS = [-60,-38,-24,-16,-12,-9.5,-8,-7,-6,-5,-4.6,-3,-1.5,0,1.5,3,4.6,5,6,7,8,9.5,12,16,24,38,60];
-const terrainMat = new THREE.MeshLambertMaterial({ vertexColors:true });
+/* ---- textures: procedural canvas first (works offline / from file://),
+   then a boot-time download swaps in real photos when it arrives. The
+   download never blocks boot: TextureLoader is fire-and-forget, on error
+   the procedural texture simply stays. Vertex colours multiply the map,
+   so the canvases are near-white speckle — detail without a brightness
+   shift — and the road is a SEPARATE mesh/material so the photographic
+   grass can never tint the asphalt or wash out the markings. ---- */
+function speckleCanvas(base, speckN, lo, hi, seed){
+  const cv = document.createElement('canvas'); cv.width = cv.height = 256;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = base; ctx.fillRect(0, 0, 256, 256);
+  const rng = mulberry32(seed);
+  for (let i=0;i<speckN;i++){
+    const g = lo + Math.floor(rng()*(hi-lo));
+    ctx.fillStyle = 'rgba(' + g + ',' + g + ',' + g + ',' + (0.15 + rng()*0.25) + ')';
+    ctx.fillRect(rng()*256, rng()*256, 1 + rng()*2.4, 1 + rng()*2.4);
+  }
+  for (let i=0;i<240;i++){
+    ctx.fillStyle = rng() < 0.5 ? 'rgba(196,178,140,0.05)' : 'rgba(140,160,140,0.05)';
+    ctx.beginPath(); ctx.arc(rng()*256, rng()*256, 6 + rng()*22, 0, 7); ctx.fill();
+  }
+  const t = new THREE.CanvasTexture(cv);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+function rockCanvas(){
+  const cv = document.createElement('canvas'); cv.width = cv.height = 128;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#d8d8d8'; ctx.fillRect(0, 0, 128, 128);
+  const rng = mulberry32(777);
+  for (let i=0;i<2600;i++){
+    const g = 120 + Math.floor(rng()*110);
+    ctx.fillStyle = 'rgba(' + g + ',' + g + ',' + g + ',' + (0.2 + rng()*0.3) + ')';
+    ctx.fillRect(rng()*128, rng()*128, 1 + rng()*2, 1 + rng()*2);
+  }
+  ctx.strokeStyle = 'rgba(70,70,70,0.35)'; ctx.lineWidth = 1;
+  for (let i=0;i<9;i++){
+    ctx.beginPath(); let x = rng()*128, y = rng()*128; ctx.moveTo(x, y);
+    for (let j=0;j<4;j++){ x += (rng()-0.5)*36; y += (rng()-0.5)*36; ctx.lineTo(x, y); }
+    ctx.stroke();
+  }
+  const t = new THREE.CanvasTexture(cv);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+function grassBladeTexture(){
+  const cv = document.createElement('canvas'); cv.width = 64; cv.height = 128;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, 64, 128);
+  const rng = mulberry32(31337);
+  for (let i=0;i<11;i++){
+    const x0 = 4 + rng()*56, bend = (rng()-0.5)*22, hgt = 62 + rng()*60, wdt = 2.2 + rng()*2.2;
+    const g = ctx.createLinearGradient(0, 128, 0, 128-hgt);
+    g.addColorStop(0, '#2c5a24'); g.addColorStop(1, '#69a84b');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(x0-wdt, 128);
+    ctx.quadraticCurveTo(x0-wdt*0.4 + bend*0.4, 128-hgt*0.6, x0 + bend, 128-hgt);
+    ctx.quadraticCurveTo(x0+wdt*0.4 + bend*0.4, 128-hgt*0.6, x0+wdt, 128);
+    ctx.fill();
+  }
+  const t = new THREE.CanvasTexture(cv);
+  t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+  return t;
+}
+const terrainMat = new THREE.MeshLambertMaterial({ vertexColors:true, map:speckleCanvas('#f2f2f2', 5200, 198, 248, 4242) });
+const roadMat = new THREE.MeshLambertMaterial({ vertexColors:true, map:speckleCanvas('#f4f4f4', 7000, 150, 235, 919) });
 const markMat = new THREE.MeshBasicMaterial({ color:0xf2f2f2 });
 const trunkMat = new THREE.MeshLambertMaterial({ color:0x6b4a2c });
 const leafMats = [0x3e7d32, 0x4c8a3a, 0x356b2a].map(c=>new THREE.MeshLambertMaterial({ color:c }));
-const rockMat = new THREE.MeshLambertMaterial({ color:0x77716a });
+const rockMat = new THREE.MeshLambertMaterial({ color:0x8a857e, map:rockCanvas() });
 const postMat = new THREE.MeshLambertMaterial({ color:0xf0f0f0 });
 const postTopMat = new THREE.MeshLambertMaterial({ color:0xd23b2e });
+const railMat = new THREE.MeshLambertMaterial({ color:0xb9bdc4 });
+const railPostMat = new THREE.MeshLambertMaterial({ color:0x7d838c });
+const grassMat = new THREE.MeshLambertMaterial({ map:grassBladeTexture(), alphaTest:0.42, side:THREE.DoubleSide });
+const potholeMat = new THREE.MeshBasicMaterial({ color:0x0a0a0c, transparent:true, opacity:0.55, depthWrite:false, polygonOffset:true, polygonOffsetFactor:-2 });
+const bumpMat = new THREE.MeshBasicMaterial({ color:0x9a9a9a, transparent:true, opacity:0.32, depthWrite:false, polygonOffset:true, polygonOffsetFactor:-2 });
+const crackMat = new THREE.MeshBasicMaterial({ color:0x0c0c0e, transparent:true, opacity:0.6, depthWrite:false, polygonOffset:true, polygonOffsetFactor:-2 });
+/* boot-time texture upgrades (verified 2026-11-19: both URLs return
+   HTTP 200, image/jpeg, Access-Control-Allow-Origin: *) */
+function upgradeTexture(url, mat){
+  new THREE.TextureLoader().load(url, t=>{
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    mat.map = t; mat.needsUpdate = true;
+  }, undefined, ()=>{ /* offline or blocked: procedural texture stays */ });
+}
+upgradeTexture('https://cdn.jsdelivr.net/gh/mrdoob/three.js@r128/examples/textures/terrain/grasslight-big.jpg', terrainMat);
+upgradeTexture('https://cdn.jsdelivr.net/gh/mrdoob/three.js@r128/examples/textures/planets/moon_1024.jpg', rockMat);
 const trunkGeo = new THREE.CylinderGeometry(0.14, 0.22, 1.8, 6);
 const canopyGeo = new THREE.IcosahedronGeometry(1.6, 0);
+const coneGeo = new THREE.ConeGeometry(1.35, 2.8, 7);
 const rockGeo = new THREE.IcosahedronGeometry(1, 0);
 const postGeo = new THREE.BoxGeometry(0.14, 1.0, 0.14);
 const postTopGeo = new THREE.BoxGeometry(0.16, 0.22, 0.16);
+const railPostGeo = new THREE.BoxGeometry(0.14, 0.66, 0.10);
+/* grass tuft: two crossed alpha planes, base at y=0 */
+const grassGeo = (()=>{
+  const pos = [ -0.45,0,0,  0.45,0,0,  0.45,0.62,0,  -0.45,0.62,0,
+                0,0,-0.45,  0,0,0.45,  0,0.62,0.45,  0,0.62,-0.45 ];
+  const uv = [ 0,0, 1,0, 1,1, 0,1,  0,0, 1,0, 1,1, 0,1 ];
+  const nor = []; for (let i=0;i<8;i++) nor.push(0, 1, 0);
+  const idx = [ 0,1,2, 0,2,3, 4,5,6, 4,6,7 ];
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uv), 2));
+  g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(nor), 3));
+  g.setIndex(idx);
+  return g;
+})();
 function hash2(a, b){ let h = Math.sin(a*127.1 + b*311.7)*43758.5453; return h - Math.floor(h); }
 
 function buildChunk(idx){
   const g = new THREE.Group();
+  const disposables = [];
+  g.userData.disposables = disposables;
   const s0 = idx*CHUNK, rows = Math.floor(CHUNK/3)+1, cols = LATS.length;
-  const pos = [], col = [], index = [];
+  const pos = [], col = [], uvG = [], uvR = [], index = [], indexRoad = [];
   for (let r=0; r<rows; r++){
     const s = s0 + r*3;
     const p = world.trackPoint(s);
@@ -1029,7 +1631,10 @@ function buildChunk(idx){
     for (let c=0; c<cols; c++){
       const lat = LATS[c];
       const info = world.heightAtSL(s, lat);
-      pos.push(p.x + rx*lat, info.h, p.z + rz*lat);
+      const wx = p.x + rx*lat, wz = p.z + rz*lat;
+      pos.push(wx, info.h, wz);
+      // world-space UVs: the texture follows the ground, never stretches
+      uvG.push(wx/7, wz/7); uvR.push(wx/2.5, wz/2.5);
       const slope = Math.abs(world.heightAtSL(s+1.5, lat).h - world.heightAtSL(s-1.5, lat).h)/3
                   + Math.abs(world.heightAtSL(s, lat+1.5).h - world.heightAtSL(s, lat-1.5).h)/3;
       let cr, cg, cb;
@@ -1040,15 +1645,29 @@ function buildChunk(idx){
       col.push(cr, cg, cb);
     }
   }
+  // quads between lat -5 and +5 (columns 9..16) are the road mesh; the
+  // rest is ground. Splitting them keeps the photographic ground texture
+  // off the asphalt entirely.
   for (let r=0; r<rows-1; r++) for (let c=0; c<cols-1; c++){
     const a = r*cols+c, b = a+1, d = a+cols, e = d+1;
-    index.push(a, d, b, b, d, e);
+    if (c >= 9 && c < 17) indexRoad.push(a, d, b, b, d, e);
+    else index.push(a, d, b, b, d, e);
   }
+  const posAttr = new THREE.BufferAttribute(new Float32Array(pos), 3);
+  const colAttr = new THREE.BufferAttribute(new Float32Array(col), 3);
   const tg = new THREE.BufferGeometry();
-  tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
-  tg.setAttribute('color', new THREE.BufferAttribute(new Float32Array(col), 3));
+  tg.setAttribute('position', posAttr);
+  tg.setAttribute('color', colAttr);
+  tg.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uvG), 2));
   tg.setIndex(index); tg.computeVertexNormals();
   g.add(new THREE.Mesh(tg, terrainMat));
+  const rg = new THREE.BufferGeometry();
+  rg.setAttribute('position', posAttr);
+  rg.setAttribute('color', colAttr);
+  rg.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uvR), 2));
+  rg.setIndex(indexRoad); rg.computeVertexNormals();
+  g.add(new THREE.Mesh(rg, roadMat));
+  disposables.push(tg, rg);
   // road markings: edge lines + center dashes
   const mp = [];
   const quadW = (cx, cy, cz, rx, rz, hw, hl)=>{
@@ -1097,7 +1716,161 @@ function buildChunk(idx){
       }
     }
   }
-  g.userData.terrainGeo = tg; g.userData.markGeo = mg;
+  disposables.push(mg);
+  /* ---- environment dressing (all deterministic per chunk, all placed
+     in TRACK SPACE with a hard lateral exclusion: nothing decorative
+     inside |lat| <= ROAD_HALF + margin) ---- */
+  const rngE = mulberry32(world.seed*137 + idx*104729 + 777);
+  const placeAt = (s, lat)=>{ const p = world.trackPoint(s);
+    const rx = Math.cos(p.heading), rz = -Math.sin(p.heading);
+    return { x:p.x + rx*lat, z:p.z + rz*lat, h:world.heightAtSL(s, lat).h,
+             surf:world.heightAtSL(s, lat).surface, heading:p.heading }; };
+  // filler boulders (visual only, well clear of the road)
+  for (let i=0;i<4;i++){
+    const s = s0 + rngE()*CHUNK, lat = (rngE()<0.5?-1:1)*(11 + rngE()*38);
+    const pl = placeAt(s, lat);
+    if (pl.surf !== 'grass' && pl.surf !== 'rock' && pl.surf !== 'floor') continue;
+    const sc = 0.8 + rngE()*1.9;
+    const r = new THREE.Mesh(rockGeo, rockMat);
+    r.position.set(pl.x, pl.h + sc*0.16, pl.z);
+    r.scale.set(sc, sc*(0.55 + rngE()*0.3), sc*(0.8 + rngE()*0.4));
+    r.rotation.set(rngE()*3, rngE()*3, rngE()*3);
+    g.add(r);
+  }
+  // bushes
+  for (let i=0;i<6;i++){
+    const s = s0 + rngE()*CHUNK, lat = (rngE()<0.5?-1:1)*(6.4 + rngE()*20);
+    const pl = placeAt(s, lat);
+    if (pl.surf !== 'grass') continue;
+    const b = new THREE.Mesh(canopyGeo, leafMats[Math.floor(rngE()*3)]);
+    b.position.set(pl.x, pl.h + 0.28, pl.z);
+    b.scale.set(0.5 + rngE()*0.55, 0.34 + rngE()*0.3, 0.5 + rngE()*0.55);
+    b.rotation.y = rngE()*3;
+    g.add(b);
+  }
+  // extra trees: round canopy or pine, further out
+  for (let i=0;i<4;i++){
+    const s = s0 + rngE()*CHUNK, lat = (rngE()<0.5?-1:1)*(10 + rngE()*34);
+    const pl = placeAt(s, lat);
+    if (pl.surf !== 'grass') continue;
+    const t = new THREE.Group();
+    if (rngE() < 0.45){ // pine
+      const trunk = new THREE.Mesh(trunkGeo, trunkMat); trunk.position.y = 1.4; trunk.scale.set(1, 1.7, 1); t.add(trunk);
+      const cone = new THREE.Mesh(coneGeo, leafMats[2]); cone.position.y = 3.4; cone.scale.setScalar(0.9 + rngE()*0.5); t.add(cone);
+      const cone2 = new THREE.Mesh(coneGeo, leafMats[2]); cone2.position.y = 4.4; cone2.scale.setScalar(0.6 + rngE()*0.3); t.add(cone2);
+    } else {
+      const trunk = new THREE.Mesh(trunkGeo, trunkMat); trunk.position.y = 0.9; t.add(trunk);
+      const c1 = new THREE.Mesh(canopyGeo, leafMats[Math.floor(rngE()*3)]);
+      c1.position.y = 2.9; c1.scale.setScalar(0.9 + rngE()*0.5); t.add(c1);
+      const c2 = new THREE.Mesh(canopyGeo, leafMats[Math.floor(rngE()*3)]);
+      c2.position.set(0.5, 3.7, 0.3); c2.scale.setScalar(0.6 + rngE()*0.4); t.add(c2);
+    }
+    t.position.set(pl.x, pl.h - 0.1, pl.z); t.rotation.y = rngE()*3;
+    g.add(t);
+  }
+  // 3D grass: instanced cross-plane tufts near the road, fading out with
+  // distance (density falls off via the pow curve), recycled per chunk
+  {
+    const rngG = mulberry32(world.seed*131 + idx*104729 + 555);
+    const mats = [], cols = [];
+    const M = new THREE.Matrix4(), Q = new THREE.Quaternion(), E = new THREE.Euler(),
+          V = new THREE.Vector3(), SV = new THREE.Vector3(), C = new THREE.Color();
+    for (let i=0;i<650;i++){
+      const s = s0 + rngG()*CHUNK;
+      const side = rngG() < 0.5 ? -1 : 1;
+      const lat = side*(5.0 + Math.pow(rngG(), 1.7)*30);
+      const info = world.heightAtSL(s, lat);
+      if (info.surface !== 'grass') continue;
+      let nearRail = false;
+      for (const st of world.barrierStretchesIn(s, s + 0.01))
+        if (Math.sign(st.lat) === side && Math.abs(Math.abs(lat) - S.BARRIER_LAT) < 0.9) nearRail = true;
+      if (nearRail) continue;
+      const p = world.trackPoint(s);
+      const rx = Math.cos(p.heading), rz = -Math.sin(p.heading);
+      const sc = 0.7 + rngG()*0.7;
+      E.set(0, rngG()*Math.PI, 0); Q.setFromEuler(E);
+      V.set(p.x + rx*lat, info.h - 0.02, p.z + rz*lat); SV.set(sc, sc*(0.8 + rngG()*0.5), sc);
+      M.compose(V, Q, SV); mats.push(M.clone());
+      C.setHSL(0.29 + rngG()*0.05, 0.45 + rngG()*0.2, 0.30 + rngG()*0.14); cols.push(C.clone());
+    }
+    if (mats.length){
+      const im = new THREE.InstancedMesh(grassGeo, grassMat, mats.length);
+      for (let i=0;i<mats.length;i++){ im.setMatrixAt(i, mats[i]); im.setColorAt(i, cols[i]); }
+      im.instanceMatrix.needsUpdate = true;
+      if (im.instanceColor) im.instanceColor.needsUpdate = true;
+      im.frustumCulled = false;
+      g.add(im);
+      disposables.push(im);
+    }
+  }
+  // guardrails: posts every ~3 m + a continuous rail at 0.62 m, following
+  // the road edge on the analytic ground height. The physics side is the
+  // row of circle obstacles from barrierObstaclesForSegment (SIM core).
+  for (const st of world.barrierStretchesIn(s0 - 1, s0 + CHUNK + 1)){
+    const a = Math.max(st.s0, s0), b = Math.min(st.s1, s0 + CHUNK);
+    if (a >= b) continue;
+    const pts = [];
+    for (let s = a; s <= b; s += 3) pts.push(s);
+    if (pts[pts.length-1] < b - 0.01) pts.push(b);
+    const P = pts.map(s=>{ const p = world.trackPoint(s);
+      const rx = Math.cos(p.heading), rz = -Math.sin(p.heading);
+      return { x:p.x + rx*st.lat, z:p.z + rz*st.lat, h:world.heightAtSL(s, st.lat).h, heading:p.heading }; });
+    for (const q of P){
+      const post = new THREE.Mesh(railPostGeo, railPostMat);
+      post.position.set(q.x, q.h + 0.31, q.z);
+      post.rotation.y = -q.heading;
+      g.add(post);
+    }
+    for (let i=0;i<P.length-1;i++){
+      const A = P[i], B = P[i+1];
+      const len = Math.hypot(B.x-A.x, B.z-A.z);
+      if (len < 0.1) continue;
+      const geo = new THREE.BoxGeometry(0.07, 0.30, len + 0.12);
+      disposables.push(geo);
+      const rail = new THREE.Mesh(geo, railMat);
+      rail.position.set((A.x+B.x)/2, (A.h+B.h)/2 + 0.62, (A.z+B.z)/2);
+      rail.lookAt(B.x, (A.h+B.h)/2 + 0.62, B.z);
+      g.add(rail);
+    }
+  }
+  // road defect decals: dark patch for a pothole, lighter for a bump,
+  // jagged strip for a crack (physics lives in heightAtSL; the road mesh
+  // is too coarse to show a sub-metre dip, so the decal carries it)
+  for (const d of world.defectsInRange(s0, s0 + CHUNK)){
+    if (d.s < s0 || d.s >= s0 + CHUNK) continue;
+    const p = world.trackPoint(d.s);
+    const rx = Math.cos(p.heading), rz = -Math.sin(p.heading);
+    const cx = p.x + rx*d.lat, cz = p.z + rz*d.lat;
+    if (d.type === 'crack'){
+      const rngC = mulberry32(Math.floor(d.seed*997) + 17);
+      const posC = [], idxC = [];
+      let latJ = d.lat;
+      const NP = 7;
+      for (let i=0;i<NP;i++){
+        const si = d.s - 1.1 + (2.2*i)/(NP-1);
+        latJ += (rngC()-0.5)*0.22; latJ = Math.max(-4.1, Math.min(4.1, latJ));
+        const pp = world.trackPoint(si);
+        const qx = Math.cos(pp.heading), qz = -Math.sin(pp.heading);
+        const hh = world.heightAtSL(si, latJ).h + 0.02;
+        posC.push(pp.x + qx*(latJ-0.045), hh, pp.z + qz*(latJ-0.045),
+                  pp.x + qx*(latJ+0.045), hh, pp.z + qz*(latJ+0.045));
+        if (i < NP-1){ const a2 = i*2; idxC.push(a2, a2+1, a2+2, a2+1, a2+3, a2+2); }
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(posC), 3));
+      geo.setIndex(idxC); geo.computeVertexNormals();
+      disposables.push(geo);
+      g.add(new THREE.Mesh(geo, crackMat));
+    } else {
+      const geo = new THREE.CircleGeometry(d.r*(d.type==='pothole' ? 0.95 : 0.85), 7);
+      disposables.push(geo);
+      const mesh = new THREE.Mesh(geo, d.type==='pothole' ? potholeMat : bumpMat);
+      mesh.rotation.x = -Math.PI/2; mesh.rotation.z = d.seed;
+      mesh.scale.set(1, 0.75 + (Math.floor(d.seed)%7)*0.05, 1);
+      mesh.position.set(cx, world.heightAtSL(d.s, d.lat).h + 0.02, cz);
+      g.add(mesh);
+    }
+  }
   return g;
 }
 const chunks = new Map();
@@ -1110,7 +1883,10 @@ function updateChunks(){
   for (const [idx, g] of chunks){
     if (!need.has(idx)){
       scene.remove(g);
-      g.userData.terrainGeo.dispose(); g.userData.markGeo.dispose();
+      // dispose only what the chunk owns: its geometries and instanced
+      // meshes. Shared geometries/materials (trees, rocks, grass) are
+      // module-level and must survive for the next chunk.
+      for (const d of (g.userData.disposables || [])) d.dispose();
       chunks.delete(idx);
     }
   }
@@ -1127,6 +1903,81 @@ function toast(msg, ms){
   clearTimeout(toastTimer);
   toastTimer = setTimeout(()=>{ $('toast').textContent=''; }, ms||2200);
 }
+/* ---- per-car beam resolution: persisted node targets + panel ---- */
+let resPanelOn = true;
+const cardResEls = [];
+function clampResTarget(v){
+  v = Math.round(Number(v));
+  if (!isFinite(v)) v = S.RES_TARGET_DEFAULT;
+  return Math.max(S.RES_TARGET_DEFAULT, Math.min(1000, v));
+}
+function resTargetOf(i){ return clampResTarget(S.carRes[i]); }
+// ] steps: 150 -> 250 -> 500 -> +10 per press up to 1000; [ reverses
+function stepResTarget(cur, delta){
+  cur = clampResTarget(cur);
+  if (delta > 0){
+    if (cur < 250) return 250;
+    if (cur < 500) return 500;
+    return Math.min(1000, cur + 10);
+  }
+  if (cur > 500) return Math.max(500, cur - 10);
+  if (cur > 250) return 250;
+  if (cur > S.RES_TARGET_DEFAULT) return S.RES_TARGET_DEFAULT;
+  return cur;
+}
+function loadCarRes(){
+  try {
+    const raw = window.localStorage.getItem('endless-drive-beamres-v1');
+    if (!raw) return;
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj !== 'object') return;
+    S.CAR_DEFS.forEach((d, i)=>{ S.carRes[i] = clampResTarget(obj[d.id]); });
+  } catch (e) { /* storage unavailable or corrupt: Normal defaults stand */ }
+}
+function saveCarRes(){
+  try {
+    const obj = {};
+    S.CAR_DEFS.forEach((d, i)=>{ obj[d.id] = resTargetOf(i); });
+    window.localStorage.setItem('endless-drive-beamres-v1', JSON.stringify(obj));
+  } catch (e) { /* storage unavailable: target still applies this session */ }
+}
+loadCarRes();
+function updateResPanel(){
+  if (!car || !carDef || !$('resCur')) return;
+  const i = S.CAR_DEFS.indexOf(carDef), t = resTargetOf(i);
+  $('resCur').innerHTML = '<b>' + carDef.name + '</b> — ' + S.resNameFor(t) +
+    '<br>Nodes: ' + car.nodes.length + ' (target ' + t + ') · Beams: ' + car.beams.length;
+  $('resList').innerHTML = S.CAR_DEFS.map((d, j)=>{
+    const tj = resTargetOf(j);
+    return '<div class="resRow' + (j===i ? ' cur' : '') + '"><span>' + d.name + '</span><b>' +
+      S.resNameFor(tj) + ' · ' + tj + ' nodes</b></div>';
+  }).join('');
+}
+function refreshCardRes(){
+  S.CAR_DEFS.forEach((d, i)=>{
+    if (!cardResEls[i]) return;
+    const t = resTargetOf(i);
+    cardResEls[i].textContent = 'Beam resolution: ' + S.resNameFor(t) + ' · ' + t + ' nodes';
+  });
+}
+function changeRes(delta){
+  const i = S.CAR_DEFS.indexOf(carDef);
+  const cur = resTargetOf(i);
+  const t = stepResTarget(cur, delta);
+  if (t === cur){
+    toast(carDef.name + ' beams already ' + S.resNameFor(cur) + ' — ' + cur + ' nodes', 1400);
+    return;
+  }
+  S.carRes[i] = t;
+  saveCarRes();
+  const sPos = Math.max(100, Math.floor(car.sHint));
+  const v = car.centerVel();
+  setCar(carDef.id, sPos);
+  car.setVelocity(v.x, v.y, v.z);
+  toast(carDef.name + ' beams: ' + S.resNameFor(t) + ' — target ' + t + ' nodes · actual ' +
+    car.nodes.length + ' nodes · ' + car.beams.length + ' beams', 2600);
+  refreshCardRes();
+}
 function setCar(defId, sPos){
   carDef = S.CAR_DEFS.find(d=>d.id===defId) || S.CAR_DEFS[0];
   car = S.spawnCar(carDef.id, world, (sPos===undefined ? 100 : sPos));
@@ -1134,6 +1985,7 @@ function setCar(defId, sPos){
   document.querySelectorAll('#carBtns button').forEach(b=>b.classList.toggle('active', b.dataset.id===carDef.id));
   $('carName').textContent = carDef.name;
   chasePos = null;
+  updateResPanel();
 }
 function readInput(){
   const inp = { throttle:0, reverse:0, brake:0, steer:0, handbrake:0 };
@@ -1158,6 +2010,10 @@ window.addEventListener('keydown', e=>{
   if (e.code === 'KeyC'){ camMode = (camMode+1)%3; $('freeBox').classList.toggle('hidden', camMode!==2);
     if (camMode===2) initFreecam(); toast(['Chase camera','Cockpit camera','Freecam'][camMode], 1200); }
   if (e.code === 'KeyB'){ debugOn = !debugOn; if (dbgGroup) dbgGroup.visible = debugOn; toast(debugOn?'Beam view ON':'Beam view OFF', 1200); }
+  if (e.code === 'KeyT'){ resPanelOn = !resPanelOn; $('resBox').classList.toggle('hidden', !resPanelOn);
+    toast(resPanelOn?'Resolution display ON':'Resolution display OFF', 1200); }
+  if (e.code === 'BracketLeft') changeRes(-1);
+  if (e.code === 'BracketRight') changeRes(1);
   if (e.code === 'KeyR'){ setCar(carDef.id, Math.max(100, Math.floor(car.sHint))); toast('Fresh ' + carDef.name, 1400); }
   if (e.code === 'KeyF'){
     if (Math.abs(car.forwardSpeed()) < 0.6 && car.maxNodeSpeed() < 0.9){ car.repair(); toast('Repaired', 1400); }
@@ -1225,11 +2081,13 @@ function buildTitle(){
     const el = document.createElement('div');
     el.className = 'carCard' + (d===pendingDef ? ' sel' : '');
     el.innerHTML = '<div class="nm">' + d.name + '</div><div class="bl">' + d.blurb +
-      '</div><div class="ts">Top speed ~' + d.topKmh + ' km/h · key ' + (i+1) + '</div>';
+      '</div><div class="ts">Top speed ~' + d.topKmh + ' km/h · key ' + (i+1) + '</div><div class="res"></div>';
+    cardResEls.push(el.querySelector('.res'));
     el.onclick = ()=>{ pendingDef = d; document.querySelectorAll('.carCard').forEach(x=>x.classList.remove('sel'));
       el.classList.add('sel'); if (!started) setCar(d.id, 100); };
     wrap.appendChild(el);
   });
+  refreshCardRes();
   const btns = $('carBtns');
   S.CAR_DEFS.forEach(d=>{
     const b = document.createElement('button');
@@ -1260,6 +2118,7 @@ function updateHUD(){
   bar.style.width = st.integrity + '%';
   bar.style.background = st.integrity > 70 ? '#57d957' : st.integrity > 40 ? '#f2b134' : '#e83a2e';
   $('beamCounts').textContent = 'Beams: ' + st.broken + ' broken · ' + st.deformed + ' bent · ' + st.total + ' total';
+  updateResPanel();
 }
 
 /* main loop */
