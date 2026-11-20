@@ -200,7 +200,20 @@ detailed modelled body that crumples with the structure:
 
 ## Tech
 
-A single self-contained `index.html`. The soft-body simulation (nodes,
+The game is split into plain JavaScript files in folders (plain `<script
+src>` tags, no modules, so it still runs from `file://` and from GitHub
+Pages with no build step):
+
+```
+index.html          head, CSS and DOM only (plus the script tags)
+js/sim/core.js      physics core: track, beams, materials, tires, cars, skinning
+js/render/car.js    car geometry, skinned mesh, B debug overlay
+js/render/world.js  procedural textures, terrain/road/barrier chunks
+js/game.js          input, cameras, title screen, HUD, main loop
+test_sim.js         32 headless physics tests (node test_sim.js)
+```
+
+The soft-body simulation (nodes,
 beams, plastic deformation, breakage, terrain and cliff physics) runs at
 480 Hz in substeps, in plain JavaScript with no dependencies; rendering by
 Three.js. The physics core is shared verbatim with a Node test suite
