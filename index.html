@@ -837,6 +837,22 @@ class SoftBodyCar {
       addMountLink(this.mountIdx[w], ringSide(this.secRings[ib], sx, 0, 'low'));
       addMountLink(this.mountIdx[w], ringSide(this.secRings[ib], sx, profB.yMid, 'mid'));
       addMountLink(this.mountIdx[w], ringSide(this.secRings[ib], sx, profB.yTop*0.85, 'mid'));
+      // cross-car braces: two diagonal links from the mount to the
+      // OPPOSITE side's low anchors. The same-side web above runs fore/
+      // aft from the mount, so it locates the mount along the car and
+      // vertically but has almost no first-order LATERAL stiffness —
+      // while the compressed strut pushes the mount away from the wheel
+      // and topples it inward like an inverted pendulum (negative
+      // stiffness ~ corner load / strut length). At low resolutions the
+      // web's weak lateral coupling plus stiff, heavy anchors just hold
+      // the perch; as the grid refines the anchors lighten and soften,
+      // the mount swings inward on the strut orbit (measured: 0.26–0.42 m
+      // sideways, strut length and link strains nearly unchanged), and
+      // the cage drops until the floor carries the car. The braces run
+      // mostly ACROSS the car, so their lateral stiffness is first-order
+      // — the same reason the wheels themselves have cross-car links.
+      addMountLink(this.mountIdx[w], ringSide(this.secRings[ia], -sx, 0, 'low'));
+      addMountLink(this.mountIdx[w], ringSide(this.secRings[ib], -sx, 0, 'low'));
     }
     // suspension beams: each wheel to its mount (the strut — first target,
     // ×1.8 stiffness — is what carries the car's weight) plus links to the
