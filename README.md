@@ -11,8 +11,26 @@ Every car is a structure of mass **nodes** held together by **beams**. A beam
 is a spring/damper strut between two nodes with two failure points:
 
 - Push it past its **deform** strain and its rest length permanently changes —
-  that's a crumple, and it stays crumpled.
+  that's a crumple, and it stays crumpled. But only up to a point: the yielded
+  rest length may travel at most 70% of the way to the break displacement.
+  Past that cap the beam stops folding and only springs — a crushed zone
+  bottoms out against real resistance instead of collapsing to nothing.
 - Push it past its **break** strain and it snaps. Those nodes are on their own.
+- Short of breaking, a beam is an **elastic with a hard limit**: the further
+  it is displaced past yield — stretched or compressed — the harder it pushes
+  back (double rate), and an unbroken beam is never allowed to sit further
+  from its rest length than its break displacement; the solver pulls it back
+  to exactly that limit. The structure holds together with real strength
+  instead of drifting apart.
+
+The shell also has **flex damping at the velocity level**: every physics
+step, each node's velocity is pulled slightly toward the velocity it would
+have if the car were moving as one perfectly rigid body. Only the
+difference — the flexing, wobbling motion — is bled off, so the car stops
+ringing like jelly after bumps and landings, while its driving, turning
+and falling are untouched by construction. During a crash the damping
+switches itself off (impact cooldowns gate it) so crumpling stays exactly
+as violent as the beams dictate, then fades back in over a quarter second.
 
 There is no scripted damage. Hit something at 100 km/h and the front nodes
 stop first, the front beams bend and break, and the rear of the car keeps
@@ -140,7 +158,7 @@ A single self-contained `index.html`. The soft-body simulation (nodes,
 beams, plastic deformation, breakage, terrain and cliff physics) runs at
 480 Hz in substeps, in plain JavaScript with no dependencies; rendering by
 Three.js. The physics core is shared verbatim with a Node test suite
-(`node test_sim.js`, 20 tests) that verifies rest stability and node/beam
+(`node test_sim.js`, 26 tests) that verifies rest stability and node/beam
 counts at every preset for all five cars, the 100 km/h head-on crash
 sequence at 150/250/500/620 nodes, beam thresholds, cliff falls and
 unclimbability, road blending, determinism (including barriers and
@@ -149,8 +167,17 @@ drive-over, body subdivision counts, all five cars driving at 250
 nodes — and, for every car at every target from 150 to 1000 nodes, a
 parked-clearance audit (no chassis node may touch the ground) plus a
 no-drag check that the car's driven top speed at 1000 nodes matches its
-500-node speed. Performance, measured headlessly in Node: simulating 10
-physics-seconds takes ≈3.3 s for a 500-node car and ≈7.9 s for a
+500-node speed. The suite also locks the beam behaviour described above:
+the plastic cap (yield stops at 70% of break displacement, and the beam
+still breaks past break strain), the hard displacement limit (a stretched
+beam is projected back to exactly the limit, and the limiter is a no-op on
+a parked car), elastic hold-together (a bumper displaced half a metre with
+deformation disabled springs back to within a centimetre), the steering
+direction (a held steer input measurably rotates the car the way the key
+says), and wobble decay (after a 0.35 m drop, the shell's internal flex
+motion in the final second is down to ≈0.02 m/s RMS — roughly a fifth of
+what the undamped shell kept). Performance, measured headlessly in Node: simulating 10
+physics-seconds takes ≈3.6 s for a 500-node car and ≈8.1 s for a
 1000-node car — faster than real time; the 1000-node tier is the extreme
 opt-in and is the first thing to cost frame rate on weaker hardware.
 
