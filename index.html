@@ -394,6 +394,16 @@ class Beam {
     // at least ~4.5 cm of yield / ~9 cm of break displacement
     this.deformStrain = Math.max((opts.deformStrain!==undefined?opts.deformStrain:0.07), 0.045/rest);
     this.breakStrain = Math.max((opts.breakStrain!==undefined?opts.breakStrain:0.4), 0.09/rest);
+    // elastic limits, both measured against the ORIGINAL rest length (the
+    // same convention checkDeform uses for its thresholds):
+    //  - maxPlastic caps how far the yielded rest length may ever travel:
+    //    a crushed zone stops folding once it has given up 70% of the
+    //    displacement that would break it, and from there it only springs.
+    //  - maxDisp is the hard displacement limit: an unbroken beam is never
+    //    allowed to sit further than this from its rest length (enforced
+    //    positionally by SoftBodyCar.enforceBeamLimits).
+    this.maxPlastic = 0.7 * this.breakStrain * rest;
+    this.maxDisp = this.breakStrain * rest;
     this.suspension = !!opts.suspension;
     this.broken = false; this.deformed = false; this.maxStrain = 0;
   }
@@ -418,7 +428,14 @@ class Beam {
       // yield point in tension and the crush visibly "heals" itself.
       this.maxStrain = ast;
       this.deformed = true;
-      this.currentRest = L - Math.sign(st)*this.deformStrain*this.rest;
+      // the yielded rest length follows the crush, but only up to the
+      // plastic cap: without the cap a beam yields indefinitely and the
+      // cage folds to nothing; capped, the zone stops collapsing and the
+      // remaining displacement is elastic (and progressively stiffened in
+      // addBeamForces), so the structure holds together with real strength
+      const newRest = L - Math.sign(st)*this.deformStrain*this.rest;
+      this.currentRest = Math.min(this.rest + this.maxPlastic,
+                                  Math.max(this.rest - this.maxPlastic, newRest));
     }
     return st;
   }
@@ -570,6 +587,7 @@ class SoftBodyCar {
     this.buildStructure();
     this.steerAngle = 0; this.sHint = 100; this.distance = 0;
     this.obstacleHits = 0; this.hitCooldown = 0; this.groundHits = 0; this.groundHitCooldown = 0;
+    this.flexRamp = 0; // flex-damping fade-in state (see dampFlex)
     this.wheelSpin = [0,0,0,0]; this.lastCenter = null;
   }
   buildStructure(){
@@ -705,8 +723,27 @@ class SoftBodyCar {
       // with the section count to keep the tube's bending stiffness (and
       // the overhangs' ride height) the same at every resolution
       const kLng = lng===true ? Math.min(4.5, Math.pow((S-1)/13, 0.7)) : (typeof lng==='number' ? lng : 1);
+      // (A +25% rate increase on non-crumple beams was tried for the
+      // jelly fix and had to come back off: combined with any extra
+      // damping it pushed the stiffest car (the coupe) over the
+      // explicit-integration stability edge in its spawn settle. The
+      // hold-together strength in this build comes from the progressive
+      // stiffening in addBeamForces, the plastic cap and the beam
+      // displacement limit, not from a higher base rate. Crumple zones
+      // keep their 0.28 factor — crash absorption lives there.)
       const k = def.stiff * clamp(1.15 - d*0.12, 0.7, 1.15) * (isCr ? 0.28 : 1) * resK * kLng;
-      beams.push(new Beam(a, b, d, { k:k, c:(target > RES_TARGET_DEFAULT ? 0.09 : 0.12)*2*Math.sqrt(k*rm),
+      // damping ratio: the original tune ran zeta ~0.12 (0.09 at high
+      // resolution) — underdamped, so bumps and corners set the shell
+      // ringing. Raised only to 0.13 (0.10 at high resolution): the
+      // stability budget is that tight. At 0.14 the coupe's spawn settle
+      // stops converging (it parks pre-strained and then yields beams
+      // sitting still); at 0.17+ a parked car gains energy and shakes
+      // itself apart; 0.28 explodes outright. Explicit damping and beam
+      // stiffness spend the SAME 480 Hz stability margin, which is also
+      // why the +25% rate above could not stay. Damping only resists
+      // relative motion; it cannot hold a load or change the parked
+      // shape.
+      beams.push(new Beam(a, b, d, { k:k, c:(target > RES_TARGET_DEFAULT ? 0.10 : 0.13)*2*Math.sqrt(k*rm),
         deformStrain:(isCr ? 0.06 : 0.10),
         breakStrain:(isCr ? 0.19 + hashN(a*31+b*17)*0.06 : 0.34 + hashN(a*31+b*17)*0.08) }));
     };
@@ -772,7 +809,11 @@ class SoftBodyCar {
       if (d < 1e-6) return;
       const rm = 2*nodes[a].mass*nodes[b].mass/(nodes[a].mass+nodes[b].mass);
       const k = def.stiff * 0.85 * resK;
-      beams.push(new Beam(a, b, d, { k:k, c:0.15*2*Math.sqrt(k*rm),
+      // rail/mount-link damping: 0.16, up from 0.15 — the same explicit-
+      // integration stability budget as the cage beams (see addBeam)
+      // caps it there; these links share nodes with the cage, so their
+      // damping spends from the same margin
+      beams.push(new Beam(a, b, d, { k:k, c:0.16*2*Math.sqrt(k*rm),
         deformStrain:0.09, breakStrain:0.30 }));
     };
     for (const sx of [-1,1]){
@@ -823,7 +864,7 @@ class SoftBodyCar {
       if (d < 1e-6) return;
       const rm = 2*nodes[a].mass*nodes[b].mass/(nodes[a].mass+nodes[b].mass);
       const k = def.stiff * clamp(1.15 - d*0.12, 0.7, 1.15) * Math.max(resK, 0.42);
-      beams.push(new Beam(a, b, d, { k:k, c:0.15*2*Math.sqrt(k*rm),
+      beams.push(new Beam(a, b, d, { k:k, c:0.16*2*Math.sqrt(k*rm),
         deformStrain:0.10, breakStrain:0.38 }));
     };
     for (let w=0; w<4; w++){
@@ -956,6 +997,115 @@ class SoftBodyCar {
     const c = this.center(), f = this.frame(), v = this.centerVel();
     this.setPoseFrame(c.x, c.y, c.z, f.right, f.up, f.fwd, v.x, v.y, v.z);
   }
+  // hard maximum beam displacement: an unbroken beam may never sit more
+  // than maxDisp (= breakStrain x rest, measured against the ORIGINAL rest
+  // length — the same convention as checkDeform's thresholds) away from
+  // its rest length. Forces alone cannot guarantee that in a crash: one
+  // 480 Hz step at 30 m/s moves a node 6 cm, straight past the limit. So
+  // after each integration pass, any beam found past the limit is
+  // projected back to exactly the limit (correction split by inverse
+  // mass, like a contact) and the relative velocity still carrying it
+  // further out is removed. Broken beams are exempt — a detached part
+  // stays detached. Within the limit this is a strict no-op.
+  enforceBeamLimits(){
+    const nodes = this.nodes;
+    for (const b of this.beams){
+      if (b.broken) continue;
+      const A = nodes[b.a], B = nodes[b.b];
+      const dx = B.pos.x-A.pos.x, dy = B.pos.y-A.pos.y, dz = B.pos.z-A.pos.z;
+      const L = Math.sqrt(dx*dx+dy*dy+dz*dz); if (L < 1e-6) continue;
+      const disp = L - b.rest, adisp = Math.abs(disp);
+      if (adisp <= b.maxDisp) continue;
+      const ux = dx/L, uy = dy/L, uz = dz/L, s = Math.sign(disp);
+      const corr = adisp - b.maxDisp;
+      const imA = 1/A.mass, imB = 1/B.mass, imSum = imA + imB;
+      const wA = imA/imSum, wB = imB/imSum;
+      A.pos.x += ux*s*corr*wA; A.pos.y += uy*s*corr*wA; A.pos.z += uz*s*corr*wA;
+      B.pos.x -= ux*s*corr*wB; B.pos.y -= uy*s*corr*wB; B.pos.z -= uz*s*corr*wB;
+      // kill only the velocity component carrying the pair FURTHER past
+      // the limit; motion back toward the limit is the elastic recovery
+      // and is left alone
+      const rel = (B.vel.x-A.vel.x)*ux + (B.vel.y-A.vel.y)*uy + (B.vel.z-A.vel.z)*uz;
+      if (s*rel > 0){
+        A.vel.x += ux*rel*wA; A.vel.y += uy*rel*wA; A.vel.z += uz*rel*wA;
+        B.vel.x -= ux*rel*wB; B.vel.y -= uy*rel*wB; B.vel.z -= uz*rel*wB;
+      }
+    }
+  }
+  // velocity-level flex damping — the jelly killer. Force-based beam
+  // damping cannot finish this job: its ratio is capped by the 480 Hz
+  // explicit integrator (past ζ≈0.13 the stiffest car's spawn settle
+  // stops converging), and the wobble that survives is a ~3 Hz shell
+  // mode whose strain is mostly joint rotation, which axial beam
+  // dampers barely reach anyway. So once per substep, after
+  // integration, this pass fits the best rigid-body velocity field of
+  // the whole car — mass-weighted COM velocity V plus ω = I⁻¹L from
+  // the current node cloud's angular momentum and inertia tensor —
+  // and pulls every node's velocity a small fraction β toward it.
+  // It only ever REMOVES energy: there is no force and no stiffness,
+  // so it spends none of the integrator's stability margin. And by
+  // construction it cannot touch rigid translation or rotation, so
+  // driving, cornering and top speed are unaffected; only the
+  // internal flex velocity — the wobble — decays.
+  // CRASH GATING: while either hit cooldown is running (an obstacle
+  // or ground impact just landed) β is 0 — a crash in progress
+  // crumples exactly as the beams dictate, with no invisible hand
+  // steadying the structure — and once the cooldowns expire it fades
+  // back in over ~0.25 s (flexRamp) instead of snapping on
+  // mid-ring-down and changing how the wreck settles.
+  dampFlex(h){
+    if (this.hitCooldown > 0 || this.groundHitCooldown > 0){ this.flexRamp = 0; return; }
+    this.flexRamp = Math.min(1, this.flexRamp + h/0.25);
+    // β = 0.012 per substep: at 0.015 the wobble died slightly faster
+    // but test 2's crash compression drifted +16.5% (the wreck's
+    // elastic springback gets damped once the gating fades back in);
+    // 0.012 keeps every crash number inside its band and still kills
+    // the wobble (test 26: RMS 0.021, max 0.269)
+    const beta = 0.012 * this.flexRamp;
+    if (beta <= 0) return;
+    const nodes = this.nodes;
+    let M = 0, cx = 0, cy = 0, cz = 0, vx = 0, vy = 0, vz = 0;
+    for (const n of nodes){
+      M += n.mass;
+      cx += n.mass*n.pos.x; cy += n.mass*n.pos.y; cz += n.mass*n.pos.z;
+      vx += n.mass*n.vel.x; vy += n.mass*n.vel.y; vz += n.mass*n.vel.z;
+    }
+    if (!(M > 0)) return;
+    cx /= M; cy /= M; cz /= M; vx /= M; vy /= M; vz /= M;
+    // angular momentum L and inertia tensor I of the current cloud
+    let Lx = 0, Ly = 0, Lz = 0;
+    let Ixx = 0, Ixy = 0, Ixz = 0, Iyy = 0, Iyz = 0, Izz = 0;
+    for (const n of nodes){
+      const rx = n.pos.x-cx, ry = n.pos.y-cy, rz = n.pos.z-cz;
+      const wx = n.vel.x-vx, wy = n.vel.y-vy, wz = n.vel.z-vz;
+      Lx += n.mass*(ry*wz - rz*wy);
+      Ly += n.mass*(rz*wx - rx*wz);
+      Lz += n.mass*(rx*wy - ry*wx);
+      const r2 = rx*rx + ry*ry + rz*rz;
+      Ixx += n.mass*(r2 - rx*rx); Iyy += n.mass*(r2 - ry*ry); Izz += n.mass*(r2 - rz*rz);
+      Ixy -= n.mass*rx*ry; Ixz -= n.mass*rx*rz; Iyz -= n.mass*ry*rz;
+    }
+    // ω = I⁻¹L via Cramer. A degenerate cloud (nodes near a point or
+    // a line) makes I singular; then skip the rotational part and
+    // damp toward pure translation rather than dividing by ~0.
+    let ox = 0, oy = 0, oz = 0;
+    const det = Ixx*(Iyy*Izz - Iyz*Iyz) - Ixy*(Ixy*Izz - Iyz*Ixz) + Ixz*(Ixy*Iyz - Iyy*Ixz);
+    const detScale = Math.abs(Ixx*Iyy*Izz);
+    if (isFinite(det) && detScale > 0 && Math.abs(det) > 1e-6*detScale){
+      ox = (Lx*(Iyy*Izz - Iyz*Iyz) - Ixy*(Ly*Izz - Iyz*Lz) + Ixz*(Ly*Iyz - Iyy*Lz)) / det;
+      oy = (Ixx*(Ly*Izz - Iyz*Lz) - Lx*(Ixy*Izz - Iyz*Ixz) + Ixz*(Ixy*Lz - Ly*Ixz)) / det;
+      oz = (Ixx*(Iyy*Lz - Ly*Iyz) - Ixy*(Ixy*Lz - Ly*Ixz) + Lx*(Ixy*Iyz - Iyy*Ixz)) / det;
+    }
+    for (const n of nodes){
+      const rx = n.pos.x-cx, ry = n.pos.y-cy, rz = n.pos.z-cz;
+      const gx = vx + (oy*rz - oz*ry);
+      const gy = vy + (oz*rx - ox*rz);
+      const gz = vz + (ox*ry - oy*rx);
+      n.vel.x += beta*(gx - n.vel.x);
+      n.vel.y += beta*(gy - n.vel.y);
+      n.vel.z += beta*(gz - n.vel.z);
+    }
+  }
   maxNodeSpeed(){ let m=0; for (const n of this.nodes){ const s = Math.sqrt(n.vel.x*n.vel.x+n.vel.y*n.vel.y+n.vel.z*n.vel.z); if (s>m) m=s; } return m; }
   hasNaN(){ for (const n of this.nodes){ if (!isFinite(n.pos.x+n.pos.y+n.pos.z+n.vel.x+n.vel.y+n.vel.z)) return true; } return false; }
 
@@ -1011,7 +1161,27 @@ class SoftBodyCar {
         const ux = dx/L, uy = dy/L, uz = dz/L;
         const rvx = B.vel.x-A.vel.x, rvy = B.vel.y-A.vel.y, rvz = B.vel.z-A.vel.z;
         const rel = rvx*ux + rvy*uy + rvz*uz;
-        const f = b.k*(L - b.currentRest) + b.c*rel;
+        // elastic core + progressive stiffening past the yield point: a
+        // beam is a plain spring inside its yield displacement, but the
+        // further it is pushed past yield — stretched OR compressed — the
+        // harder it pushes back (an added 1x rate on the excess, so the
+        // rate past yield is 2x in total). Real elastics and steel both
+        // do this; a purely linear beam just keeps giving at the same
+        // rate until it breaks, which lets a crushed zone fold away
+        // instead of holding the cage together. Symmetric both ways:
+        // resisting collapse matters as much as resisting being torn
+        // apart. The added rate is a plain multiplier on the beam's own
+        // k, so it inherits the per-resolution rate scaling (resK) and
+        // the beam subcycling. It is kept at 1x on purpose: at 3x the
+        // stiffest car (the coupe) went unstable in its spawn settle —
+        // past-yield beams are exactly the ones carrying the transient
+        // loads there, and doubling their rate is what the 480 Hz
+        // integration budget affords.
+        const disp = L - b.currentRest;
+        let f = b.k*disp;
+        const yieldDisp = b.deformStrain*b.rest, adisp = Math.abs(disp);
+        if (adisp > yieldDisp) f += Math.sign(disp) * b.k * (adisp - yieldDisp) * 1;
+        f += b.c*rel;
         Ft[b.a].x += ux*f; Ft[b.a].y += uy*f; Ft[b.a].z += uz*f;
         Ft[b.b].x -= ux*f; Ft[b.b].y -= uy*f; Ft[b.b].z -= uz*f;
         if (doDeform && !this.noDeform) b.checkDeform(nodes, h);
@@ -1148,6 +1318,12 @@ class SoftBodyCar {
         n.pos.x += n.vel.x*hh; n.pos.y += n.vel.y*hh; n.pos.z += n.vel.z*hh;
       }
     }
+    // hard beam displacement limit, applied after the beams have moved
+    // the nodes and before contacts resolve — see enforceBeamLimits
+    this.enforceBeamLimits();
+    // velocity-level flex damping (jelly control), gated off while a
+    // crash impact is in progress — see dampFlex
+    this.dampFlex(h);
     // collisions
     for (let i=0;i<nodes.length;i++){
       const n = nodes[i];
@@ -1403,6 +1579,15 @@ function buildCarMeshes(){
         ox:vx-nodes[d[1]].rest.x, oy:vy-nodes[d[1]].rest.y, oz:vz-nodes[d[1]].rest.z })));
     }
     const mesh = new THREE.Mesh(geo, MATS[key]);
+    // the skin's vertices are WORLD positions (updateSkin writes them
+    // every frame) while this mesh sits at the origin, so the geometry's
+    // bounding sphere — computed once from the spawn-local coordinates —
+    // is stale forever after: frustum culling against it makes the whole
+    // body vanish at some camera angles / distances from spawn while the
+    // car is physically still there. Culling off is the fix (recomputing
+    // the sphere per frame would just burn the budget the skin already
+    // spends on normals).
+    mesh.frustumCulled = false;
     carGroup.add(mesh);
     skinParts.push({ geo:geo, anchors:anchors, n:n });
   }
@@ -1492,11 +1677,15 @@ function buildDebug(){
   const pg = new THREE.BufferGeometry();
   pg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(car.nodes.length*3), 3));
   dbgPts = new THREE.Points(pg, new THREE.PointsMaterial({ color:0xffffff, size:0.13 }));
+  // world-space positions in an origin-sitting object, same stale-sphere
+  // culling trap as the car skin — culling off (see buildCarMeshes)
+  dbgPts.frustumCulled = false;
   dbgGroup.add(dbgPts);
   const lg = new THREE.BufferGeometry();
   lg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(car.beams.length*6), 3));
   lg.setAttribute('color', new THREE.BufferAttribute(new Float32Array(car.beams.length*6), 3));
   dbgLines = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ vertexColors:true }));
+  dbgLines.frustumCulled = false; // world-space positions, see dbgPts above
   dbgGroup.add(dbgLines);
 }
 function updateDebug(){
@@ -1676,13 +1865,20 @@ function buildChunk(idx){
   tg.setAttribute('color', colAttr);
   tg.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uvG), 2));
   tg.setIndex(index); tg.computeVertexNormals();
-  g.add(new THREE.Mesh(tg, terrainMat));
+  // chunk geometry is built in WORLD coordinates while the chunk group
+  // sits at the origin — the same layout as the car skin. These meshes
+  // never move once built, but culling is switched off anyway so no
+  // stale-sphere surprise can ever blank a chunk: chunk visibility is
+  // already managed by distance in updateChunks.
+  const terrainMesh = new THREE.Mesh(tg, terrainMat); terrainMesh.frustumCulled = false;
+  g.add(terrainMesh);
   const rg = new THREE.BufferGeometry();
   rg.setAttribute('position', posAttr);
   rg.setAttribute('color', colAttr);
   rg.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uvR), 2));
   rg.setIndex(indexRoad); rg.computeVertexNormals();
-  g.add(new THREE.Mesh(rg, roadMat));
+  const roadMesh = new THREE.Mesh(rg, roadMat); roadMesh.frustumCulled = false;
+  g.add(roadMesh);
   disposables.push(tg, rg);
   // road markings: edge lines + center dashes
   const mp = [];
@@ -1704,7 +1900,8 @@ function buildChunk(idx){
   const mg = new THREE.BufferGeometry();
   mg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(mp), 3));
   mg.computeVertexNormals();
-  g.add(new THREE.Mesh(mg, markMat));
+  const markMesh = new THREE.Mesh(mg, markMat); markMesh.frustumCulled = false; // world coords, see terrain above
+  g.add(markMesh);
   // obstacles in this chunk's segments
   const segA = Math.floor(s0/50), segB = Math.floor((s0+CHUNK)/50);
   for (let seg = segA; seg <= segB; seg++){
@@ -1876,7 +2073,8 @@ function buildChunk(idx){
       geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(posC), 3));
       geo.setIndex(idxC); geo.computeVertexNormals();
       disposables.push(geo);
-      g.add(new THREE.Mesh(geo, crackMat));
+      const crackMesh = new THREE.Mesh(geo, crackMat); crackMesh.frustumCulled = false; // world coords, see terrain above
+      g.add(crackMesh);
     } else {
       const geo = new THREE.CircleGeometry(d.r*(d.type==='pothole' ? 0.95 : 0.85), 7);
       disposables.push(geo);
@@ -2007,8 +2205,15 @@ function readInput(){
   const inp = { throttle:0, reverse:0, brake:0, steer:0, handbrake:0 };
   if (camMode === 2){ inp.handbrake = 1; return inp; } // parked while freecamming
   let st = 0;
-  if (keys['KeyA'] || keys['ArrowLeft']) st += 1;
-  if (keys['KeyD'] || keys['ArrowRight']) st -= 1;
+  // sign convention: frame()'s "right" vector (up x fwd) actually points
+  // to the car's LEFT in this coordinate system, and the whole sim is
+  // built consistently on that mislabelled vector — in sim terms, steer
+  // -1 turns the car toward its own left. So the KEYS are mapped to match
+  // the sim (left key = steer -1), not the other way round: do not "fix"
+  // frame() instead, everything else (spawn, skin, wheel direction) is
+  // built on it. With the old mapping, Left steered right.
+  if (keys['KeyA'] || keys['ArrowLeft']) st -= 1;
+  if (keys['KeyD'] || keys['ArrowRight']) st += 1;
   inp.steer = st;
   if (keys['KeyW'] || keys['ArrowUp']) inp.throttle = 1;
   if (keys['KeyS'] || keys['ArrowDown']){
