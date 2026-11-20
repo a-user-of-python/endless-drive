@@ -32,6 +32,47 @@ and falling are untouched by construction. During a crash the damping
 switches itself off (impact cooldowns gate it) so crumpling stays exactly
 as violent as the beams dictate, then fades back in over a quarter second.
 
+### Materials — a strong frame, sacrificial ends
+
+Beams are not all the same stuff. At cage generation every beam is
+assigned a **zone** from where it sits (section along the car × height in
+the ring) and a simplified **material** with its own stiffness, yield
+strain, break strain and plastic travel:
+
+- **Bumpers** — softest; they are there to be hit first and fold cheaply.
+- **Crumple zones** (front and rear) — soft, but with the longest fold
+  travel: they absorb the crash progressively, metre by metre.
+- **Panels** (doors, roof, hood skin) — medium-weak; they dent and tear
+  without pretending to be structure.
+- **Frame** (floor, rails, low structure) — the strong spine: yield and
+  break strains roughly 2.4× the crumple zones', and very little plastic
+  travel — it would rather spring than fold.
+- **Cabin** (pillars and the cabin ring) — the strongest of all; the
+  survival cell.
+
+Measured on the sedan: at 50 km/h head-on, the crumple zone deforms and
+breaks doing the absorbing while the frame takes 2 deformed / 0 broken
+beams and the cabin takes none at all. Every beam also tracks its live
+**stress** (elastic strain relative to its material's yield), and the
+**B** skeleton view colours by it: green at rest, through yellow and
+orange, to red at and past yield — so you can watch a crash load the
+structure before it gives.
+
+### Suspension and tires
+
+Suspension is per-car in character, not just in stiffness: each car has
+its own spring rate **and its own damper**, sized for the body-bounce
+mode (the coupe is stiff and heavily damped, the SUV soft and slower).
+Dropped from 0.35 m, every car's second bounce is under 40% of its first
+compression — the pogo-stick era is over.
+
+Each tire is its own little model too: per-car grip, heating and cooling
+constants, and a live temperature per wheel. Slip (burnouts, hard
+cornering, locked brakes) heats the tire; grip follows temperature —
+about 0.85× cold, full across the optimal window, fading again when
+overheated. Warm tires measurably stop the car shorter than cold ones
+(≈9% from 60 km/h in the test suite).
+
 There is no scripted damage. Hit something at 100 km/h and the front nodes
 stop first, the front beams bend and break, and the rear of the car keeps
 coming forward on its own momentum until the beams either haul it to a stop
@@ -74,8 +115,13 @@ The **body scales with the setting**: there is one master body per car,
 and its triangle density follows the node target — each body quad is
 subdivided from 1×1 at 150 nodes (the floor: exactly the original body's
 density, so the car never turns into a blob) up to 6×6 at 1000 nodes.
-Every body vertex is still skinned to its 3 nearest cage nodes, so a finer
-cage also crumples more smoothly. Triangle counts per car run from
+Body vertices are skinned to the cage **cell** they belong to (section
+pair × ring segment), with their offset re-applied through the cell's own
+deformed frame — so in a crash the panels move with their own piece of
+cage instead of blending across the car, and the body stays matched to
+the nodes (the test suite measures body-vs-cage mismatch after a
+100 km/h crash; the cell skinning roughly halves it versus the old
+3-nearest-nodes blend). Triangle counts per car run from
 348–408 at 150 nodes to 12,528–14,688 at 1000.
 
 Under the hood, finer cages need softer per-beam rates to stay stable at
@@ -158,7 +204,7 @@ A single self-contained `index.html`. The soft-body simulation (nodes,
 beams, plastic deformation, breakage, terrain and cliff physics) runs at
 480 Hz in substeps, in plain JavaScript with no dependencies; rendering by
 Three.js. The physics core is shared verbatim with a Node test suite
-(`node test_sim.js`, 26 tests) that verifies rest stability and node/beam
+(`node test_sim.js`, 32 tests) that verifies rest stability and node/beam
 counts at every preset for all five cars, the 100 km/h head-on crash
 sequence at 150/250/500/620 nodes, beam thresholds, cliff falls and
 unclimbability, road blending, determinism (including barriers and
@@ -176,9 +222,18 @@ deformation disabled springs back to within a centimetre), the steering
 direction (a held steer input measurably rotates the car the way the key
 says), and wobble decay (after a 0.35 m drop, the shell's internal flex
 motion in the final second is down to ≈0.02 m/s RMS — roughly a fifth of
-what the undamped shell kept). Performance, measured headlessly in Node: simulating 10
-physics-seconds takes ≈3.6 s for a 500-node car and ≈8.1 s for a
-1000-node car — faster than real time; the 1000-node tier is the extreme
+what the undamped shell kept). Six further tests lock the v2.3 systems:
+material ordering and the 50 km/h zone-damage pattern (frame and cabin
+pristine, crumple zone spent), per-car suspension bounce (second bounce
+≤ 40% of the first, every car), tire heating and the warm-vs-cold
+braking gap, beam sleep (a settled parked car evaluates **zero** beams
+and drifts 0 mm until input, an impact or a shove wakes it), a driving
+performance ceiling, and the body-vs-cage skinning mismatch bound.
+Performance, measured headlessly in Node: simulating 10 physics-seconds
+of driving takes ≈2.8 s for a 500-node car and ≈6.9 s for a 1000-node
+car — faster than real time; and a settled parked car costs essentially
+nothing at all, because the simulation sleeps instead of staying loaded.
+The 1000-node tier is the extreme
 opt-in and is the first thing to cost frame rate on weaker hardware.
 
 Ride height, stated plainly: the strut-perch collapse described above is
