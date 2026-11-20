@@ -38,11 +38,11 @@ Each car has its **own resolution setting: a target node count**. The grid
 generator picks the section/ring layout that lands the total node count
 ( grid + bumpers + mounts + wheels ) on the target.
 
-- **NORMAL — 150 nodes** (≈600 beams)
-- **HIGH — 250 nodes** (≈1,440 beams)
-- **ULTRA — 500 nodes** (≈2,930 beams)
+- **NORMAL — 150 nodes** (604 beams)
+- **HIGH — 250 nodes** (1,448 beams)
+- **ULTRA — 500 nodes** (2,934 beams)
 - **ULTRA+ — past 500**, `]` keeps adding **+10 nodes** per press, up to
-  **1000 nodes** (≈5,870 beams)
+  **1000 nodes** (5,878 beams)
 
 `[` steps back down symmetrically (above 500 in −10 steps, then
 500 → 250 → 150). Changing the setting respawns the current car fresh at
@@ -64,7 +64,14 @@ Under the hood, finer cages need softer per-beam rates to stay stable at
 480 Hz; beam forces are therefore subcycled (evaluated twice per step,
 three times past 500 nodes) so the structure can stay stiff without
 ringing, and the parallel chord families keep the shell from sagging
-under its own weight at fine resolutions.
+under its own weight at fine resolutions. Each strut mount is also
+braced across the car to the opposite side's low anchors: the mount's
+own web runs fore/aft and barely locates it sideways, while the
+compressed strut tries to topple it inward — at fine resolutions that
+used to win, the mounts swung in on their struts and the body sank
+until the floor carried the car (and dragged, capping top speed). The
+cross braces give the perch first-order lateral stiffness at every
+resolution.
 
 ## The world
 
@@ -133,23 +140,29 @@ A single self-contained `index.html`. The soft-body simulation (nodes,
 beams, plastic deformation, breakage, terrain and cliff physics) runs at
 480 Hz in substeps, in plain JavaScript with no dependencies; rendering by
 Three.js. The physics core is shared verbatim with a Node test suite
-(`node test_sim.js`, 18 tests) that verifies rest stability and node/beam
+(`node test_sim.js`, 20 tests) that verifies rest stability and node/beam
 counts at every preset for all five cars, the 100 km/h head-on crash
 sequence at 150/250/500/620 nodes, beam thresholds, cliff falls and
 unclimbability, road blending, determinism (including barriers and
 defects), the 60-second drive, off-road placement audits, a pothole
-drive-over, body subdivision counts, and all five cars driving at 250
-nodes. Performance, measured headlessly in Node: simulating 10
-physics-seconds takes ≈3.4 s for a 500-node car and ≈7.7 s for a
+drive-over, body subdivision counts, all five cars driving at 250
+nodes — and, for every car at every target from 150 to 1000 nodes, a
+parked-clearance audit (no chassis node may touch the ground) plus a
+no-drag check that the car's driven top speed at 1000 nodes matches its
+500-node speed. Performance, measured headlessly in Node: simulating 10
+physics-seconds takes ≈3.3 s for a 500-node car and ≈7.9 s for a
 1000-node car — faster than real time; the 1000-node tier is the extreme
 opt-in and is the first thing to cost frame rate on weaker hardware.
 
-Known cosmetic residuals, stated plainly: at 250 nodes the SUV parks with
-its rearmost floor nodes just touching the ground (it drives perfectly —
-all five cars pass the 250-node drive test); at the extreme past-Ultra
-counts (620–1000) the shell sags enough that some floor nodes rest on the
-ground when parked, and top speed is drag-limited at 1000 nodes. The
-three named presets (150/250/500) are the tuned tiers.
+Ride height, stated plainly: the strut-perch collapse described above is
+fixed and test-locked. Measured parked clearance (lowest chassis node,
+wheels excluded) is 0.11–0.30 m for every car at every setting from 150
+to 1000 nodes, with zero ground contact anywhere; the tightest case is
+the SUV at 500 nodes (0.11 m). Driven top speed at 1000 nodes now matches
+500 nodes for all five cars. What remains is ordinary suspension: a
+parked car settles 30–60 mm onto its springs, because that is what the
+springs are for. The 1000-node tier's only real cost is performance, as
+noted above.
 
 Note: v1's WebRTC multiplayer is not in this version — it was built for
 v1's straight road and does not fit the new world.
