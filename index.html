@@ -3,1263 +3,1292 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Endless Drive — Web</title>
+<title>Endless Drive — Web v2 (Soft Body)</title>
+<!--
+  Endless Drive Web v2 — node/beam soft-body edition.
+  Copyright (c) 2026. All rights reserved. Viewing only — no use,
+  copying, or redistribution without written permission.
+-->
 <style>
   html, body { margin:0; padding:0; overflow:hidden; background:#0b0e13; height:100%;
-    font-family: "Segoe UI", system-ui, -apple-system, Arial, sans-serif; color:#eef2f6; }
+    font-family:"Segoe UI", system-ui, -apple-system, Arial, sans-serif; color:#eef2f6; }
   #game { position:fixed; inset:0; }
   canvas { display:block; }
-
-  /* ---------- shared UI ---------- */
-  .panel { background:rgba(10,14,20,.72); border:1px solid rgba(255,255,255,.14);
-    border-radius:14px; padding:14px 18px; backdrop-filter: blur(3px); }
+  .panel { background:rgba(10,14,20,.74); border:1px solid rgba(255,255,255,.15);
+    border-radius:14px; padding:14px 18px; }
   .hidden { display:none !important; }
-
-  /* ---------- HUD (big) ---------- */
   #hud { position:fixed; inset:0; pointer-events:none; z-index:5; }
-  #speedBox { position:absolute; top:22px; left:22px; min-width:250px; }
+  #speedBox { position:absolute; top:22px; left:22px; min-width:260px; }
   #speedVal { font-size:84px; font-weight:800; line-height:.95; letter-spacing:-1px; }
-  #speedBox .unit { font-size:30px; font-weight:600; color:#bcd; margin-left:6px; }
-  #gearVal { float:right; font-size:64px; font-weight:800; color:#7fd4ff; line-height:1; }
-  #rpmWrap { margin-top:10px; }
-  #rpmWrap .lab { font-size:19px; color:#cfe; letter-spacing:2px; }
-  .barOuter { height:20px; background:rgba(255,255,255,.13); border-radius:6px; overflow:hidden; margin-top:4px; }
-  .barInner { height:100%; width:0%; background:#57d957; transition:width .05s linear; }
+  #speedBox .unit { font-size:28px; font-weight:600; color:#bcd; margin-left:6px; }
+  #carName { font-size:22px; font-weight:700; color:#8fd0ff; margin-top:2px; }
   #distBox { position:absolute; top:22px; right:22px; text-align:right; font-size:30px; font-weight:700; }
-  #distBox .best { font-size:21px; color:#aebac6; font-weight:600; margin-top:4px; }
-  #condBox { position:absolute; left:22px; bottom:22px; width:400px; }
-  #condBox h3 { margin:0 0 8px 0; font-size:21px; letter-spacing:3px; color:#dfe7ee; }
-  .condRow { display:flex; align-items:center; margin:5px 0; font-size:20px; }
-  .condRow .nm { width:118px; color:#cfd8e0; }
-  .condRow .barOuter { flex:1; height:17px; margin:0; }
-  #tempFuelBox { position:absolute; right:22px; bottom:22px; width:360px; font-size:20px; }
-  #tempFuelBox .row { display:flex; align-items:center; margin:7px 0; }
-  #tempFuelBox .nm { width:64px; color:#cfd8e0; letter-spacing:1px; }
-  #tempFuelBox .barOuter { flex:1; height:19px; margin:0 10px 0 0; }
-  #tempFuelBox .val { width:64px; text-align:right; font-weight:700; }
+  #structBox { position:absolute; left:22px; bottom:22px; width:400px; font-size:20px; }
+  #structBox h3 { margin:0 0 8px 0; font-size:21px; letter-spacing:3px; }
+  .barOuter { height:20px; background:rgba(255,255,255,.13); border-radius:6px; overflow:hidden; margin-top:4px; }
+  .barInner { height:100%; width:100%; background:#57d957; }
+  #beamCounts { margin-top:8px; font-size:20px; color:#dfe7ee; }
+  #helpBox { position:absolute; right:22px; bottom:22px; width:340px; font-size:18px; line-height:1.5; color:#cfd8e0; }
+  #helpBox .k { color:#8fd0ff; font-weight:700; }
   #toast { position:absolute; top:110px; left:50%; transform:translateX(-50%);
-    font-size:34px; font-weight:700; text-shadow:0 2px 10px rgba(0,0,0,.7); white-space:nowrap; }
-  #offroad { position:absolute; bottom:200px; left:50%; transform:translateX(-50%);
-    font-size:26px; font-weight:700; color:#ffd97a; letter-spacing:3px; text-shadow:0 2px 8px rgba(0,0,0,.8); }
+    font-size:32px; font-weight:700; text-shadow:0 2px 10px rgba(0,0,0,.7); white-space:nowrap; }
   #freeBox { position:absolute; top:170px; left:50%; transform:translateX(-50%); text-align:center; }
   #freeBox .t { font-size:34px; font-weight:800; color:#8fd0ff; letter-spacing:4px; text-shadow:0 2px 10px rgba(0,0,0,.7); }
-  #freeBox .h { font-size:21px; color:#e6eef5; margin-top:6px; text-shadow:0 2px 8px rgba(0,0,0,.8); }
-  #mpStatus { position:absolute; top:120px; right:22px; font-size:20px; color:#9fe8a9; text-align:right; }
-
-  /* ---------- overlays ---------- */
+  #freeBox .h { font-size:20px; color:#e6eef5; margin-top:6px; text-shadow:0 2px 8px rgba(0,0,0,.8); }
+  #carBtns { position:absolute; bottom:22px; left:50%; transform:translateX(-50%); pointer-events:auto; display:flex; gap:8px; }
+  #carBtns button { background:rgba(10,14,20,.8); color:#eef2f6; border:1px solid rgba(255,255,255,.3);
+    font-size:18px; font-weight:700; padding:9px 14px; border-radius:9px; cursor:pointer; }
+  #carBtns button.active { background:#1d6fd1; border-color:#1d6fd1; }
   .overlay { position:fixed; inset:0; z-index:10; display:flex; align-items:center; justify-content:center;
-    background:rgba(4,6,10,.45); }
-  .card { max-width:880px; width:92%; max-height:92vh; overflow:auto; background:rgba(10,14,20,.88);
-    border:1px solid rgba(255,255,255,.16); border-radius:18px; padding:30px 38px; }
-  .card h1 { font-size:64px; margin:0 0 4px 0; letter-spacing:2px; }
-  .card .tag { font-size:23px; color:#c6d2dd; margin-bottom:20px; }
-  .controls { display:grid; grid-template-columns:190px 1fr; gap:7px 18px; font-size:21px; margin:14px 0 20px 0; }
+    background:rgba(4,6,10,.5); }
+  .card { max-width:980px; width:94%; max-height:94vh; overflow:auto; background:rgba(10,14,20,.9);
+    border:1px solid rgba(255,255,255,.16); border-radius:18px; padding:28px 36px; }
+  .card h1 { font-size:60px; margin:0 0 4px 0; letter-spacing:2px; }
+  .card .tag { font-size:22px; color:#c6d2dd; margin-bottom:16px; line-height:1.4; }
+  .carCards { display:flex; gap:12px; flex-wrap:wrap; margin:14px 0; }
+  .carCard { pointer-events:auto; flex:1 1 160px; background:rgba(255,255,255,.07); border:2px solid rgba(255,255,255,.18);
+    border-radius:12px; padding:14px; cursor:pointer; }
+  .carCard.sel { border-color:#ffd94d; background:rgba(255,217,77,.12); }
+  .carCard .nm { font-size:24px; font-weight:800; }
+  .carCard .bl { font-size:17px; color:#c6d2dd; margin-top:4px; line-height:1.35; }
+  .carCard .ts { font-size:17px; color:#8fd0ff; margin-top:6px; font-weight:700; }
+  .controls { display:grid; grid-template-columns:170px 1fr; gap:6px 16px; font-size:20px; margin:12px 0 16px 0; }
   .controls .k { color:#8fd0ff; font-weight:700; }
   .bigBtn { pointer-events:auto; display:inline-block; background:#1d6fd1; color:#fff; border:none;
     font-size:24px; font-weight:700; padding:13px 30px; border-radius:10px; cursor:pointer; }
   .bigBtn:hover { background:#2a80e8; }
-  .bigBtn.ghost { background:rgba(255,255,255,.12); }
-  #pressEnter { font-size:30px; font-weight:800; color:#ffd94d; text-align:center; margin-top:8px; letter-spacing:1px; }
-  .warn { font-size:19px; color:#ffd97a; text-align:center; margin-top:12px; }
-  #deadCard h1 { color:#ff5a4d; }
-  #deadReason { font-size:27px; margin:8px 0 18px 0; }
-  /* multiplayer */
-  #mpCard h2, .card h2 { font-size:30px; margin:18px 0 8px 0; }
-  .mpRow { display:flex; gap:12px; flex-wrap:wrap; margin:10px 0; }
-  textarea.code { width:100%; height:74px; font-size:14px; font-family:ui-monospace, Menlo, monospace;
-    background:#0a0f16; color:#bfe3ff; border:1px solid rgba(255,255,255,.25); border-radius:8px; padding:8px; }
-  .mpNote { font-size:18px; color:#aebac6; line-height:1.45; }
-  #mpState { font-size:21px; font-weight:700; color:#9fe8a9; margin-top:8px; }
-  a { color:#8fd0ff; }
+  #pressEnter { font-size:28px; font-weight:800; color:#ffd94d; text-align:center; margin-top:10px; }
 </style>
 </head>
 <body>
 <div id="game"></div>
 
-<!-- ================= HUD ================= -->
 <div id="hud" class="hidden">
   <div id="speedBox" class="panel">
-    <div><span id="speedVal">0</span><span class="unit">mph</span><span id="gearVal">1</span></div>
-    <div id="rpmWrap"><span class="lab">RPM</span><div class="barOuter"><div id="rpmBar" class="barInner"></div></div></div>
+    <div><span id="speedVal">0</span><span class="unit">km/h</span></div>
+    <div id="carName">Sedan</div>
   </div>
-  <div id="distBox" class="panel"><div id="distVal">0.00 mi</div><div class="best" id="bestVal">best 0.00 mi</div></div>
-  <div id="condBox" class="panel"><h3>CONDITION</h3><div id="condRows"></div></div>
-  <div id="tempFuelBox" class="panel">
-    <div class="row"><span class="nm">TEMP</span><div class="barOuter"><div id="tempBar" class="barInner"></div></div><span class="val" id="tempVal">88C</span></div>
-    <div class="row"><span class="nm">FUEL</span><div class="barOuter"><div id="fuelBar" class="barInner"></div></div><span class="val" id="fuelVal">100%</span></div>
+  <div id="distBox" class="panel"><div id="distVal">0.00 km</div></div>
+  <div id="structBox" class="panel">
+    <h3>STRUCTURE</h3>
+    <div style="display:flex;justify-content:space-between"><span>Integrity</span><b id="integVal">100%</b></div>
+    <div class="barOuter"><div id="integBar" class="barInner"></div></div>
+    <div id="beamCounts">Beams: 0 broken · 0 bent</div>
   </div>
+  <div id="helpBox" class="panel">
+    <span class="k">W A S D</span> drive &nbsp; <span class="k">Space</span> handbrake<br>
+    <span class="k">C</span> camera &nbsp; <span class="k">B</span> beam view &nbsp; <span class="k">R</span> reset<br>
+    <span class="k">F</span> repair (stopped) &nbsp; <span class="k">1–5</span> cars &nbsp; <span class="k">P</span> pause
+  </div>
+  <div id="carBtns"></div>
   <div id="toast"></div>
-  <div id="offroad" class="hidden">OFF ROAD</div>
-  <div id="freeBox" class="hidden"><div class="t">FREECAM</div><div class="h">WASD move &nbsp;|&nbsp; arrow keys look &nbsp;|&nbsp; E / Q up / down &nbsp;|&nbsp; C back to the car</div></div>
-  <div id="mpStatus"></div>
+  <div id="freeBox" class="hidden"><div class="t">FREECAM</div><div class="h">WASD move &nbsp;|&nbsp; arrows look &nbsp;|&nbsp; E / Q up / down &nbsp;|&nbsp; C back to the car</div></div>
 </div>
 
-<!-- ================= TITLE ================= -->
 <div id="titleScr" class="overlay">
   <div class="card">
     <h1>ENDLESS DRIVE</h1>
-    <div class="tag">One endless straight road. Real physics. Cars that break — piece by piece. Now with multiplayer.</div>
+    <div class="tag">Soft-body edition. Every car is a cage of nodes and beams — hit something and the
+      front crumples, beams bend and snap, and the back of the car keeps coming until its beams stop it.
+      Endless twisting road, and cliffs you <b>cannot</b> climb back up.</div>
+    <div class="carCards" id="carCards"></div>
     <div class="controls">
-      <span class="k">W A S D / arrows</span><span>drive (hold S at a full stop for reverse; in reverse, W goes back to drive)</span>
-      <span class="k">Space</span><span>handbrake — drift</span>
-      <span class="k">C</span><span>camera: chase / cockpit / freecam (fly around)</span>
-      <span class="k">R</span><span>reset onto the road (after you total it: tow truck, full repair)</span>
-      <span class="k">F</span><span>repair — only at a full stop</span>
+      <span class="k">W A S D / arrows</span><span>drive (S brakes, then reverses at a stop)</span>
+      <span class="k">Space</span><span>handbrake</span>
+      <span class="k">C</span><span>camera: chase / cockpit / freecam</span>
+      <span class="k">B</span><span>show the node &amp; beam skeleton (green = good, orange = bent, red = broken)</span>
+      <span class="k">R</span><span>reset — fresh car on the road</span>
+      <span class="k">F</span><span>repair in place — only at a full stop</span>
+      <span class="k">1 – 5</span><span>switch car</span>
       <span class="k">P / Esc</span><span>pause</span>
-      <span class="k">Careful</span><span>a hard enough crash — or landing — totals the car</span>
     </div>
-    <h2>Multiplayer (WebRTC — no server, free)</h2>
-    <div class="mpNote">Two players, peer-to-peer. One of you creates an invite code and sends it to the other
-      (any chat works). The other pastes it and sends back a reply code. No account, no server —
-      your browsers connect directly using ICE. If a connection fails, one of you may be behind a
-      strict router that needs a relay; there is no relay in this version.</div>
-    <div class="mpRow">
-      <button class="bigBtn" id="mpHostBtn">1) Create invite code</button>
-      <button class="bigBtn ghost" id="mpJoinBtn">Join with an invite code</button>
-    </div>
-    <div id="mpHostUI" class="hidden">
-      <div class="mpNote">Send this invite code to the other player:</div>
-      <textarea class="code" id="mpOfferOut" readonly></textarea>
-      <div class="mpNote" style="margin-top:8px">Then paste their reply code here:</div>
-      <textarea class="code" id="mpAnswerIn" placeholder="paste reply code"></textarea>
-      <div class="mpRow"><button class="bigBtn" id="mpConnectBtn">2) Connect</button></div>
-    </div>
-    <div id="mpJoinUI" class="hidden">
-      <div class="mpNote">Paste the invite code you were sent:</div>
-      <textarea class="code" id="mpOfferIn" placeholder="paste invite code"></textarea>
-      <div class="mpRow"><button class="bigBtn" id="mpReplyBtn">Make my reply code</button></div>
-      <div class="mpNote">Send this reply code back to the host:</div>
-      <textarea class="code" id="mpAnswerOut" readonly></textarea>
-    </div>
-    <div id="mpState"></div>
+    <div style="text-align:center"><button class="bigBtn" id="startBtn">Drive</button></div>
     <div id="pressEnter">PRESS ENTER TO DRIVE</div>
-    <div class="warn">Watch the temperature gauge: a smashed radiator will cook the engine.</div>
   </div>
 </div>
 
-<!-- ================= DEAD ================= -->
-<div id="deadScr" class="overlay hidden">
-  <div class="card" id="deadCard">
-    <h1>TOTALED</h1>
-    <div id="deadReason">The car is done.</div>
-    <div class="mpNote">Press <b>R</b> for the tow truck — full repair, back on the road.</div>
-  </div>
-</div>
-
-<!-- ================= PAUSE ================= -->
 <div id="pauseScr" class="overlay hidden">
   <div class="card"><h1>PAUSED</h1><div class="tag">Press P or Esc to keep driving.</div></div>
 </div>
 
-<script type="importmap">
-{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
-</script>
-
-<script type="module">
-import * as THREE from 'three';
-
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// === SIM CORE START ===
+'use strict';
 /* ================================================================
-   Endless Drive — Web edition
-   Physics/damage are a direct port of the native sim.c (v1.2).
-   World difference, per design: the road is ONE STRAIGHT LINE —
-   center x = 0 forever, flat, chunk edges identical, so segments
-   always connect with no lateral offsets, ever.
+   SIM CORE — pure JS, no THREE / document / window.
+   Node/beam soft-body physics, procedural track, car definitions.
    ================================================================ */
+function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
+function lerp(a,b,t){ return a+(b-a)*t; }
+function sstep(t){ t=clamp(t,0,1); return t*t*(3-2*t); }
+function mulberry32(a){ return function(){ a|=0; a=(a+0x6D2B79F5)|0; let t=Math.imul(a^(a>>>15),1|a); t=(t+Math.imul(t^(t>>>7),61|t))^t; return ((t^(t>>>14))>>>0)/4294967296; }; }
+function hashN(n){ const s=Math.sin(n*127.1+311.7)*43758.5453; return s-Math.floor(s); }
+function hash2i(x,y){ const s=Math.sin(x*269.5+y*183.3+74.7)*43758.5453; return s-Math.floor(s); }
 
-// ---------- small utils ----------
-const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
-const lerp = (a, b, t) => a + (b - a) * t;
-const hash01 = n => { const s = Math.sin(n * 127.1 + 311.7) * 43758.5458; return s - Math.floor(s); };
+/* ---------------- Track ---------------- */
+const DS = 5;                    // centerline sample spacing (m)
+const ROAD_HALF = 4.6;
+const CLIFF_FIRST = 600, CLIFF_PERIOD = 750, CLIFF_LEN = 170, CLIFF_EDGE = 7.0;
 
-// ---------- world constants ----------
-const ROAD_HALF = 5.2, BARRIER_OFF = 6.1;
-const CHUNK = 60;                 // metres per world chunk
-const LAKE_EVERY = 5;             // a lake may appear once per 5 chunks
-
-// Lakes: deterministic discs beside the road. Returns list near z.
-function lakesNear(z) {
-  const out = [];
-  const seg = Math.floor(z / (CHUNK * LAKE_EVERY));
-  for (let s = seg - 1; s <= seg + 1; s++) {
-    if (hash01(s * 7.13) < 0.45) continue;              // ~55% of segments have a lake
-    const side = hash01(s * 3.71) < 0.5 ? -1 : 1;
-    const cx = side * (17 + hash01(s * 5.37) * 15);     // 17..32 m from center
-    const cz = s * CHUNK * LAKE_EVERY + hash01(s * 9.91) * CHUNK * LAKE_EVERY;
-    const r = 9 + hash01(s * 4.53) * 8;                 // 9..17 m
-    out.push({ x: cx, z: cz, r, waterY: 0.22 });
+class TrackWorld {
+  constructor(seed){
+    this.seed = (seed===undefined?1337:seed)|0;
+    this.samples = [{s:0, x:0, z:0, y:this.elev(0), h:0, k:0}];
+    this.obsCache = new Map();
+    this.extraObstacles = [];
   }
-  return out;
-}
-function waterDepth(x, z) {
-  let d = 0;
-  for (const L of lakesNear(z)) {
-    const dx = x - L.x, dz = z - L.z, dist = Math.sqrt(dx * dx + dz * dz);
-    if (dist < L.r) d = Math.max(d, (1 - dist / L.r) * 1.15);
+  elev(s){ return 3.0*Math.sin(s*0.004) + 2.0*Math.sin(s*0.011+1.7) + 0.8*Math.sin(s*0.023+4.1); }
+  kappa(s){
+    // smooth random walk: value noise on 180 m knots, clamped
+    const u = s/180, i = Math.floor(u), f = u-i, t = sstep(f);
+    const a = hash2i(i, this.seed)*2-1, b = hash2i(i+1, this.seed)*2-1;
+    return lerp(a,b,t) * 0.011;
   }
-  return d;
-}
-const groundHeight = (x, z) => 0;   // the world is flat; the road never climbs or drops
-
-// ---------- parts / events ----------
-const PART = { RADIATOR:0, ENGINE:1, TRANS:2, FUELTANK:3, TIRE_FL:4, TIRE_FR:5, TIRE_RL:6, TIRE_RR:7, STEERING:8, BRAKES:9, COUNT:10 };
-const PART_NAMES = ["Radiator","Engine","Gearbox","Fuel tank","Tire FL","Tire FR","Tire RL","Tire RR","Steering","Brakes"];
-const EV = { IMPACT:1, LANDING:2, LAUNCH:3 };
-const DEAD = { NONE:0, OVERHEAT:1, FUEL:2, CRASH:3, FALL:4 };
-const GEARS = [3.6, 2.5, 1.8, 1.35, 1.05, 0.85], FINAL_DRIVE = 3.4, WHEEL_R = 0.33, CAR_MASS = 1250;
-
-function newCar(z) {
-  return {
-    x:0, y:0.02, z:z||0, vx:0, vy:0, vz:0, heading:0, yawRate:0,
-    steer:0, steerAngle:0, gear:1, rpm:900, distance:0, damage:0,
-    airborne:false, gy:0, steerPull:0, scrapeAcc:0, evCd:0, inWater:false,
-    suspY:0, suspVel:0, pitch:0, roll:0, wheelG:[0,0,0,0], aLong:0, aLat:0,
-    part:new Array(10).fill(100), engineTemp:88, fuel:1, dead:0, deadReason:0,
-    powerMul:1, transSlip:0
-  };
-}
-function repairCar(c) {
-  c.part.fill(100); c.damage = 0; c.steerPull = 0;
-  c.engineTemp = 88; c.fuel = 1; c.dead = 0; c.deadReason = 0;
-}
-function carSpeeds(c) {
-  const fx = Math.sin(c.heading), fz = Math.cos(c.heading);
-  const rx = Math.cos(c.heading), rz = -Math.sin(c.heading);
-  return { vf: c.vx * fx + c.vz * fz, vl: c.vx * rx + c.vz * rz, onRoad: Math.abs(c.x) <= ROAD_HALF + 0.4 };
-}
-function torqueCurve(rpm) {
-  const t = clamp((rpm - 800) / 6000, 0, 1);
-  return 0.68 + 0.32 * Math.sin(Math.PI * t);
-}
-
-// ---------- the step: faithful port of ed_car_step for a straight, flat world ----------
-function carStep(c, dt, inp, cols, events) {
-  let fx = Math.sin(c.heading), fz = Math.cos(c.heading);
-  let rx = Math.cos(c.heading), rz = -Math.sin(c.heading);
-  let vf = c.vx * fx + c.vz * fz;
-  let vl = c.vx * rx + c.vz * rz;
-  const onRoad = Math.abs(c.x) <= ROAD_HALF + 0.4;
-
-  // part-derived performance factors
-  const engF = 0.3 + 0.7 * (c.part[PART.ENGINE] / 100);
-  let tempF = 1;
-  if (c.engineTemp > 108) tempF = lerp(1, 0.55, clamp((c.engineTemp - 108) / 17, 0, 1));
-  if (c.engineTemp > 125) tempF = 0.25;
-  if (!c.dead && c.engineTemp >= 138) { c.dead = 1; c.deadReason = DEAD.OVERHEAT; }
-  if (!c.dead && c.fuel <= 0) { c.dead = 1; c.deadReason = DEAD.FUEL; }
-  c.powerMul = c.dead ? 0 : engF * tempF;
-  const tireAvg = (c.part[PART.TIRE_FL] + c.part[PART.TIRE_FR] + c.part[PART.TIRE_RL] + c.part[PART.TIRE_RR]) * 0.25;
-  let tireGrip = tireAvg >= 60 ? 1 : 0.55 + 0.45 * (tireAvg / 60);
-  const blownL = (c.part[PART.TIRE_FL] <= 0.5 || c.part[PART.TIRE_RL] <= 0.5);
-  const blownR = (c.part[PART.TIRE_FR] <= 0.5 || c.part[PART.TIRE_RR] <= 0.5);
-  const anyBlown = blownL || blownR;
-  if (anyBlown) tireGrip *= 0.72;
-  const steerFactor = c.part[PART.STEERING] < 50 ? 0.45 + 0.55 * (c.part[PART.STEERING] / 50) : 1;
-  const brakeFactor = 0.25 + 0.75 * (c.part[PART.BRAKES] / 100);
-
-  // transmission slip
-  if (c.transSlip > 0) c.transSlip -= dt;
-  else if (c.part[PART.TRANS] < 45 && inp.throttle > 0.5 && !c.airborne) {
-    if (hash01(Math.floor(c.distance * 2) + Math.floor(c.z)) < 0.0035) c.transSlip = 0.45;
-  }
-
-  // engine / gears
-  const throttle = c.dead ? 0 : inp.throttle;
-  if (c.gear >= 1) {
-    const wheelRpm = Math.abs(vf) / WHEEL_R * GEARS[c.gear - 1] * FINAL_DRIVE * 9.5493;
-    let target = wheelRpm < 900 ? 900 + throttle * 600 : wheelRpm;
-    if (throttle > 0.05 && wheelRpm < 1300) target = 1300 + throttle * 900;
-    c.rpm += (target - c.rpm) * Math.min(1, dt * 7);
-    if (c.transSlip > 0) c.rpm += (5200 - c.rpm) * Math.min(1, dt * 5);
-    if (c.rpm > 6400 && c.gear < 6 && vf > 2) { c.gear++; c.rpm *= 0.68; }
-    else if (c.rpm < 2100 && c.gear > 1) { c.gear--; c.rpm *= 1.35; }
-  } else {
-    const wheelRpm = Math.abs(vf) / WHEEL_R * GEARS[0] * FINAL_DRIVE * 9.5493;
-    c.rpm += ((wheelRpm < 900 ? 900 + throttle * 700 : wheelRpm) - c.rpm) * Math.min(1, dt * 7);
-  }
-  c.rpm = clamp(c.rpm, 0, 7600);
-
-  let driveF = 0;
-  if (!c.airborne && throttle > 0) {
-    const ratio = c.gear >= 1 ? GEARS[c.gear - 1] : GEARS[0];
-    let tq = 360 * torqueCurve(c.rpm) * engF * tempF;
-    if (c.transSlip > 0) tq *= 0.15;
-    driveF = throttle * tq * ratio * FINAL_DRIVE / WHEEL_R / CAR_MASS;
-    if (c.gear === 0) driveF = -driveF * 0.8;
-    if (c.dead) driveF = 0;
-  }
-  vf += driveF * dt;
-
-  // brakes
-  if (!c.airborne && inp.brake > 0) {
-    const b = 11.5 * brakeFactor * inp.brake * dt;
-    if (vf > 0) vf = Math.max(0, vf - b); else if (vf < 0) vf = Math.min(0, vf + b);
-  }
-  // drag + rolling resistance + blown-tire drag
-  vf -= (vf * Math.abs(vf) * 0.0003 + vf * 0.012) * dt;
-  if (anyBlown && !c.airborne) vf -= vf * 0.55 * dt;
-  // slope gravity: world is flat, slope is 0 — kept for parity
-  // water drag
-  const wdepth = waterDepth(c.x, c.z);
-  c.inWater = wdepth > 0.25;
-  if (c.inWater && !c.airborne) {
-    const dragK = Math.min(0.92, wdepth * 1.15) * 2.4;
-    vf -= vf * dragK * dt; vl -= vl * dragK * dt;
-  }
-
-  // steering / yaw
-  const prevVf = vf, prevVl = vl;
-  const steerTarget = inp.steer * steerFactor;
-  const spdF = 1 / (1 + vf * vf * 0.0035);
-  const maxSteer = 0.55 * (0.3 + 0.7 * spdF);
-  const rate = Math.abs(steerTarget) > Math.abs(c.steer) ? 5.5 : 8.0;
-  c.steer += clamp(steerTarget - c.steer, -rate * dt, rate * dt);
-  const pull = c.steerPull + (blownL ? 0.045 : 0) - (blownR ? 0.045 : 0);
-  c.steerAngle = (c.steer * maxSteer) + pull;
-  if (!c.airborne) {
-    const targetYaw = (vf * Math.tan(c.steerAngle) / 2.7) * (inp.handbrake ? 1.35 : 1.0);
-    c.yawRate += (targetYaw - c.yawRate) * Math.min(1, dt * (inp.handbrake ? 4.5 : 7.0));
-  } else {
-    c.yawRate *= (1 - 0.25 * dt);
-  }
-  c.heading += c.yawRate * dt;
-  // grip: bleed lateral into forward
-  if (!c.airborne) {
-    const grip = (onRoad ? (inp.handbrake ? 1.6 : 9.5) : (inp.handbrake ? 1.2 : 5.5)) * tireGrip;
-    const keep = Math.exp(-grip * dt);
-    const nvl = vl * keep;
-    const transferred = (Math.abs(vl) - Math.abs(nvl)) * (inp.handbrake ? 0.3 : 0.9);
-    vf += (vf >= 0 ? 1 : -1) * transferred;
-    vl = nvl;
-    if (inp.handbrake) vf -= vf * 0.55 * dt;
-  }
-  fx = Math.sin(c.heading); fz = Math.cos(c.heading);
-  rx = Math.cos(c.heading); rz = -Math.sin(c.heading);
-  c.vx = fx * vf + rx * vl;
-  c.vz = fz * vf + rz * vl;
-
-  // vertical (flat world: only ramp rocks put you in the air)
-  const spd = Math.hypot(c.vx, c.vz);
-  c.x += c.vx * dt; c.z += c.vz * dt;
-  const gy = groundHeight(c.x, c.z); c.gy = gy;
-  if (!c.airborne) { c.y = gy; c.vy = 0; }
-  if (c.airborne) {
-    c.vy -= 9.81 * dt; c.y += c.vy * dt;
-    if (c.y <= gy) {
-      const impact = -c.vy;
-      c.y = gy; c.airborne = false;
-      c.vx *= 0.92; c.vz *= 0.92;
-      c.suspVel -= impact * 0.32;
-      if (impact > 3) events.push({ kind: EV.LANDING, x: c.x, z: c.z, speed: impact, closing: impact, rel: spd, lx: 0, lz: 0, ckind: 0 });
-      c.vy = 0;
+  extendTo(s){
+    const arr = this.samples;
+    while (arr[arr.length-1].s < s){
+      const p = arr[arr.length-1];
+      const k = this.kappa(p.s + DS*0.5);
+      const h = p.h + k*DS;
+      arr.push({ s:p.s+DS, x:p.x+Math.sin(h)*DS, z:p.z+Math.cos(h)*DS, y:this.elev(p.s+DS), h:h, k:k });
     }
   }
-  c.distance += spd * dt;
-
-  // suspension / body motion (flat ground: lean from acceleration only)
-  {
-    const avg = 0;
-    if (!c.airborne) {
-      const target = avg - gy;
-      c.suspVel += ((target - c.suspY) * 90 - c.suspVel * 12) * dt;
-      c.suspY += c.suspVel * dt;
-      const aLongNow = (vf - prevVf) / Math.max(dt, 0.001);
-      const aLatNow = (vl - prevVl) / Math.max(dt, 0.001);
-      c.aLong += (aLongNow - c.aLong) * Math.min(1, dt * 5);
-      c.aLat += (aLatNow - c.aLat) * Math.min(1, dt * 5);
-      const pitchT = -c.aLong * 0.0038;
-      const rollT = c.aLat * 0.0032;
-      c.pitch += (pitchT - c.pitch) * Math.min(1, dt * 8);
-      c.roll += (rollT - c.roll) * Math.min(1, dt * 8);
-    } else {
-      c.suspY += (-0.07 - c.suspY) * Math.min(1, dt * 4);
-      c.pitch += (-0.03 - c.pitch) * Math.min(1, dt * 1.5);
-      c.roll += (0 - c.roll) * Math.min(1, dt * 1.5);
-    }
+  trackPoint(s){
+    if (s < 0) s = 0;
+    this.extendTo(s+DS);
+    const i = Math.floor(s/DS), a = this.samples[i], b = this.samples[i+1] || a;
+    const t = (s - a.s)/DS;
+    return { s:s, x:lerp(a.x,b.x,t), z:lerp(a.z,b.z,t), y:lerp(a.y,b.y,t),
+             heading:lerp(a.h,b.h,t), curvature:lerp(a.k,b.k,t) };
   }
+  cliffAt(s){
+    if (s < CLIFF_FIRST) return null;
+    const rel = s - CLIFF_FIRST, idx = Math.floor(rel/CLIFF_PERIOD), frac = rel - idx*CLIFF_PERIOD;
+    if (frac >= CLIFF_LEN) return null;
+    return { index:idx, s0:CLIFF_FIRST+idx*CLIFF_PERIOD, s1:CLIFF_FIRST+idx*CLIFF_PERIOD+CLIFF_LEN,
+             side:(idx%2===0)?1:-1, drop:30 + (idx%3)*5, edge:CLIFF_EDGE };
+  }
+  hill(s, ah){ // terrain rise away from the road (ah = |lateral|)
+    if (ah <= 7.6) return 0;
+    const d = ah - 7.6;
+    return d*(0.22 + 0.06*Math.sin(s*0.013)) + (Math.sin(s*0.05+ah*0.3)+Math.sin(s*0.021-ah*0.17))*0.35*Math.min(1,d*0.2);
+  }
+  heightAtSL(s, lat){
+    const base = this.elev(s), ah = Math.abs(lat);
+    if (ah <= ROAD_HALF) return { h:base, surface:'road' };
+    const cz = this.cliffAt(s);
+    if (cz && lat*cz.side > 0){
+      const d = ah - cz.edge;
+      if (d >= 0){
+        const floorH = base - cz.drop + (Math.sin(s*0.06+ah*0.4)+Math.sin(s*0.033-ah*0.2))*0.45;
+        if (d < 2.5){
+          const topH = base + this.hill(s, cz.edge);
+          return { h:lerp(topH, floorH, sstep(d/2.5)), surface:'rock' };
+        }
+        return { h:floorH, surface:'floor' };
+      }
+    }
+    if (ah <= 7.6) return { h:base, surface:'grass' };
+    return { h:base + this.hill(s, ah), surface:(this.hill(s,ah) > 6 ? 'rock' : 'grass') };
+  }
+  nearestTrack(x, z, sHint){
+    let hint = (sHint===undefined?0:sHint); if (hint < 40) hint = 40;
+    this.extendTo(hint+160);
+    let best = null, bestD = 1e18, bestI = 0;
+    const i0 = Math.max(0, Math.floor((hint-140)/DS)), i1 = Math.min(this.samples.length-1, Math.ceil((hint+140)/DS));
+    for (let i=i0;i<=i1;i++){
+      const p = this.samples[i], dx = x-p.x, dz = z-p.z, d = dx*dx+dz*dz;
+      if (d < bestD){ bestD = d; best = p; bestI = i; }
+    }
+    const fx = Math.sin(best.h), fz = Math.cos(best.h), rx = Math.cos(best.h), rz = -Math.sin(best.h);
+    const dx = x-best.x, dz = z-best.z;
+    const along = dx*fx + dz*fz, lateral = dx*rx + dz*rz;
+    const s = Math.max(0, best.s + along);
+    return { s:s, lateral:lateral, dist:Math.sqrt(bestD), index:bestI };
+  }
+  groundHeight(x, z, sHint){
+    const nt = this.nearestTrack(x, z, sHint);
+    const c = this.heightAtSL(nt.s, nt.lateral);
+    // gradient in track frame -> slope + world normal
+    const e = 1.2;
+    const dS = (this.heightAtSL(nt.s+e, nt.lateral).h - this.heightAtSL(nt.s-e, nt.lateral).h)/(2*e);
+    const dL = (this.heightAtSL(nt.s, nt.lateral+e).h - this.heightAtSL(nt.s, nt.lateral-e).h)/(2*e);
+    const tp = this.trackPoint(nt.s);
+    const fx = Math.sin(tp.heading), fz = Math.cos(tp.heading), rx = Math.cos(tp.heading), rz = -Math.sin(tp.heading);
+    let nx = -(fx*dS + rx*dL), nz = -(fz*dS + rz*dL), ny = 1;
+    const il = 1/Math.sqrt(nx*nx+ny*ny+nz*nz); nx*=il; ny*=il; nz*=il;
+    const grad = Math.sqrt(dS*dS + dL*dL);
+    return { h:c.h, surface:c.surface, slope:Math.atan(grad), s:nt.s, lateral:nt.lateral,
+             normal:{x:nx,y:ny,z:nz} };
+  }
+  obstaclesForSegment(seg){
+    if (this.obsCache.has(seg)) return this.obsCache.get(seg);
+    const rng = mulberry32(this.seed*7919 + seg*104729 + 13);
+    const out = [];
+    const nT = 5 + Math.floor(rng()*3);
+    for (let j=0;j<nT;j++){
+      const s = seg*50 + rng()*50, side = rng()<0.5?-1:1;
+      const lat = side*(9 + rng()*36);
+      const p = this.trackPoint(s), rx = Math.cos(p.heading), rz = -Math.sin(p.heading);
+      out.push({ type:'tree', s:s, lat:lat, x:p.x+rx*lat, z:p.z+rz*lat, y:p.y, r:0.45, h:3.4 });
+    }
+    const nR = 2 + Math.floor(rng()*2);
+    for (let j=0;j<nR;j++){
+      const s = seg*50 + rng()*50, side = rng()<0.5?-1:1;
+      const nearEdge = rng() < 0.35;
+      const lat = side*(nearEdge ? (6.2+rng()*2.4) : (10+rng()*30));
+      const p = this.trackPoint(s), rx = Math.cos(p.heading), rz = -Math.sin(p.heading);
+      const r = 0.7 + rng()*0.9;
+      out.push({ type:'rock', s:s, lat:lat, x:p.x+rx*lat, z:p.z+rz*lat, y:p.y, r:r, h:r*1.1 });
+    }
+    // barrier posts along a cliff edge, with gaps
+    const cz = this.cliffAt(seg*50+25);
+    if (cz && seg*50+50 > cz.s0 && seg*50 < cz.s1){
+      for (let j=0;j<5;j++){
+        if (rng() < 0.3) continue; // the gap
+        const s = seg*50 + j*10 + 2, lat = cz.side*(CLIFF_EDGE-0.7);
+        const p = this.trackPoint(s), rx = Math.cos(p.heading), rz = -Math.sin(p.heading);
+        out.push({ type:'post', s:s, lat:lat, x:p.x+rx*lat, z:p.z+rz*lat, y:p.y, r:0.32, h:1.0 });
+      }
+    }
+    this.obsCache.set(seg, out);
+    if (this.obsCache.size > 400){ const k = this.obsCache.keys().next().value; this.obsCache.delete(k); }
+    return out;
+  }
+  getObstacles(x, z, sHint){
+    const nt = this.nearestTrack(x, z, sHint);
+    const seg = Math.floor(nt.s/50), out = [];
+    for (let g=seg-2; g<=seg+2; g++){
+      if (g < 0) continue;
+      for (const o of this.obstaclesForSegment(g)){
+        const dx = o.x-x, dz = o.z-z;
+        if (dx*dx+dz*dz < 3600) out.push(o);
+      }
+    }
+    for (const o of this.extraObstacles){
+      const dx = o.x-x, dz = o.z-z;
+      if (dx*dx+dz*dz < 3600) out.push(o);
+    }
+    return out;
+  }
+}
 
-  // collisions
-  if (c.evCd > 0) c.evCd -= dt;
-  const spdNow = Math.hypot(c.vx, c.vz);
-  // guardrails: both car circles, always present on a straight road
-  if (!c.airborne || c.y < 1.0) {
-    for (let ci = 0; ci < 2; ci++) {
-      const off = ci === 0 ? 1.05 : -1.05;
-      const ccx = c.x + fx * off, ccz = c.z + fz * off;
-      const clat = ccx; // road center is x=0, right vector is +x
-      const side = clat > 0 ? 1 : -1;
-      const lim = BARRIER_OFF - 0.25 - 0.98;
-      if (Math.abs(clat) > lim && c.y < 1.0) {
-        const pen = Math.abs(clat) - lim;
-        c.x -= side * pen;
-        const vn = c.vx * side;
-        if (vn > 0) {
-          const evSpeed = Math.max(vn, Math.min(30, pen * 30));
-          c.vx -= side * vn;
-          if (vn > 1.2) c.vx += side * (-vn * 0.22);
-          c.yawRate += -off * side * vn * 0.05;
-          if (c.evCd <= 0 && evSpeed > 1.1) {
-            events.push({ kind: EV.IMPACT, ckind: 0, x: ccx, z: ccz, nx: -side, nz: 0, speed: evSpeed, closing: vn, rel: spdNow, abs: spdNow, lx: side * 0.89, lz: off });
-            c.evCd = 0.08;
-          }
-          c.scrapeAcc += pen * spdNow * 0.02;
+/* ---------------- Beams ---------------- */
+class Beam {
+  constructor(a, b, rest, opts){
+    this.a = a; this.b = b; this.rest = rest; this.currentRest = rest;
+    this.k = opts.k; this.c = opts.c||0;
+    // strain floors in absolute terms: a very short beam reaches a given
+    // strain from a tiny displacement, so its thresholds are raised to need
+    // at least ~4.5 cm of yield / ~9 cm of break displacement
+    this.deformStrain = Math.max((opts.deformStrain!==undefined?opts.deformStrain:0.07), 0.045/rest);
+    this.breakStrain = Math.max((opts.breakStrain!==undefined?opts.breakStrain:0.4), 0.09/rest);
+    this.suspension = !!opts.suspension;
+    this.broken = false; this.deformed = false; this.maxStrain = 0;
+  }
+  length(nodes){
+    const A = nodes[this.a], B = nodes[this.b];
+    const dx = B.pos.x-A.pos.x, dy = B.pos.y-A.pos.y, dz = B.pos.z-A.pos.z;
+    return Math.sqrt(dx*dx+dy*dy+dz*dz);
+  }
+  strain(nodes){ return (this.length(nodes) - this.rest)/this.rest; }
+  // plastic deform + break bookkeeping for the current length; returns strain.
+  // Both thresholds are measured against the ORIGINAL rest length: if they
+  // were measured against the yielded rest length, a crushing beam would
+  // yield forever and never break, and rebound would "heal" the crush.
+  checkDeform(nodes, dt){
+    if (this.broken) return 0;
+    const L = this.length(nodes), st = (L - this.rest)/this.rest, ast = Math.abs(st);
+    if (ast > this.breakStrain){ this.broken = true; return st; }
+    if (ast > this.deformStrain && ast > this.maxStrain){
+      // yield with max-strain memory: the rest length follows only when the
+      // beam is strained further than it has EVER been. Without the memory,
+      // the elastic bounce after a crash pulls crushed beams back past the
+      // yield point in tension and the crush visibly "heals" itself.
+      this.maxStrain = ast;
+      this.deformed = true;
+      this.currentRest = L - Math.sign(st)*this.deformStrain*this.rest;
+    }
+    return st;
+  }
+}
+
+/* ---------------- Car definitions ---------------- */
+/* sections: z as fraction of length (+ = front), hw = half-width factor,
+   yLow / yMid / yTop = node heights (m) in rest pose */
+function stdSections(hoodTop, cabTop, rearTop){
+  return [
+    { z: 0.50, hw:0.94, yLow:0.42, yMid:0.62, yTop:hoodTop },
+    { z: 0.17, hw:1.00, yLow:0.40, yMid:0.66, yTop:cabTop },
+    { z:-0.17, hw:1.00, yLow:0.40, yMid:0.66, yTop:cabTop },
+    { z:-0.50, hw:0.94, yLow:0.44, yMid:0.64, yTop:rearTop }
+  ];
+}
+const CAR_DEFS = [
+  { id:'sedan', name:'Sedan', blurb:'Balanced family sedan. Front-wheel drive, forgiving, tough cage.',
+    color:0xc23b2e, accent:0x222222, length:4.6, width:1.82, mass:1320, drive:'FWD',
+    power:135000, engineForce:9800, drag:0.0019, stiff:272000, suspK:43000,
+    wheelBase:0.60, trackW:0.86, wheelR:0.33, sections:stdSections(0.86,1.42,0.92), topKmh:196 },
+  { id:'pickup', name:'Pickup', blurb:'Tall, heavy work truck with a real bed. Rear-wheel drive, soft springs.',
+    color:0x3f6fb5, accent:0xdddddd, length:5.2, width:1.98, mass:1980, drive:'RWD',
+    power:190000, engineForce:14200, drag:0.0026, stiff:264000, suspK:49000, rideBoost:0.06, topMassScale:0.65, arbScale:1.25,
+    wheelBase:0.62, trackW:0.88, wheelR:0.37, sections:stdSections(1.02,1.78,1.05), topKmh:178 },
+  { id:'coupe', name:'Sports Coupe', blurb:'Low, wide and stiff. Rear-wheel drive, fast, crumples less — and hurts more.',
+    color:0xf2b134, accent:0x181818, length:4.4, width:1.92, mass:1240, drive:'RWD',
+    power:265000, engineForce:11800, drag:0.0014, stiff:368000, suspK:54000,
+    wheelBase:0.60, trackW:0.90, wheelR:0.32, sections:stdSections(0.78,1.22,0.80), topKmh:228 },
+  { id:'suv', name:'SUV', blurb:'Tall and heavy, soft suspension, lots of roof to bend. Four-wheel drive.',
+    color:0x5f8f5a, accent:0x2b2b2b, length:4.8, width:1.94, mass:1860, drive:'4WD',
+    power:175000, engineForce:12800, drag:0.0025, stiff:240000, suspK:46000, rideBoost:0.05, topMassScale:0.42, arbScale:1.7,
+    wheelBase:0.60, trackW:0.88, wheelR:0.36, sections:stdSections(0.98,1.78,1.76), topKmh:184 },
+  { id:'muscle', name:'Muscle Car', blurb:'Long hood, heavy nose, big power. Rear-wheel drive, loves a straight line.',
+    color:0x74348f, accent:0xf0f0f0, length:4.95, width:1.90, mass:1620, drive:'RWD',
+    power:235000, engineForce:13800, drag:0.0021, stiff:296000, suspK:45000,
+    wheelBase:0.58, trackW:0.87, wheelR:0.34, sections:stdSections(0.88,1.34,0.86), topKmh:214 }
+];
+
+/* ---------------- Soft-body car ---------------- */
+class SoftBodyCar {
+  constructor(def, world){
+    this.def = def; this.world = world;
+    this.buildStructure();
+    this.steerAngle = 0; this.sHint = 100; this.distance = 0;
+    this.obstacleHits = 0; this.hitCooldown = 0; this.groundHits = 0; this.groundHitCooldown = 0;
+    this.wheelSpin = [0,0,0,0]; this.lastCenter = null;
+  }
+  buildStructure(){
+    const def = this.def, L = def.length, W = def.width;
+    const nodes = [];
+    const addNode = (x,y,z,mass,kind)=>{ nodes.push({ pos:{x:0,y:0,z:0}, vel:{x:0,y:0,z:0},
+      rest:{x:x,y:y,z:z}, mass:mass, kind:kind, radius:(kind==='wheel'?def.wheelR:0.06) }); return nodes.length-1; };
+    const wheelMass = 13, chassisMassEach = (def.mass - 4*wheelMass)/38;
+    this.secIdx = [];
+    def.sections.forEach(sec=>{
+      const hw = W*0.5*sec.hw, z = sec.z*L, ids = {}, yLow = sec.yLow + (def.rideBoost||0);
+      ids.lowL = addNode(-hw, yLow, z, chassisMassEach, 'chassis');
+      ids.lowR = addNode( hw, yLow, z, chassisMassEach, 'chassis');
+      ids.midL = addNode(-hw*1.01, sec.yMid, z, chassisMassEach, 'chassis');
+      ids.midR = addNode( hw*1.01, sec.yMid, z, chassisMassEach, 'chassis');
+      const topMass = chassisMassEach * (def.topMassScale||1);
+      ids.upL  = addNode(-hw*0.8, sec.yTop, z, topMass, 'chassis');
+      ids.upR  = addNode( hw*0.8, sec.yTop, z, topMass, 'chassis');
+      ids.floorC = addNode(0, yLow+0.03, z, chassisMassEach, 'chassis');
+      ids.topC   = addNode(0, sec.yTop+0.03, z, topMass, 'chassis');
+      this.secIdx.push(ids);
+    });
+    const s0 = this.secIdx[0], s3 = this.secIdx[3];
+    this.frontBumper = addNode(0, def.sections[0].yMid*0.85, L*0.5+0.18, chassisMassEach, 'chassis');
+    this.rearBumper  = addNode(0, def.sections[3].yMid*0.85, -L*0.5-0.18, chassisMassEach, 'chassis');
+    const wz = def.wheelBase*L*0.5, wx = W*0.5*def.trackW;
+    // suspension mount (strut top) directly above each wheel — the vertical
+    // beam from wheel to mount is what actually carries the car's weight
+    this.mountIdx = [
+      addNode(-wx, def.wheelR+0.52,  wz, chassisMassEach, 'chassis'),
+      addNode( wx, def.wheelR+0.52,  wz, chassisMassEach, 'chassis'),
+      addNode(-wx, def.wheelR+0.52, -wz, chassisMassEach, 'chassis'),
+      addNode( wx, def.wheelR+0.52, -wz, chassisMassEach, 'chassis')
+    ];
+    this.wheelIdx = [
+      addNode(-wx, def.wheelR,  wz, wheelMass, 'wheel'),
+      addNode( wx, def.wheelR,  wz, wheelMass, 'wheel'),
+      addNode(-wx, def.wheelR, -wz, wheelMass, 'wheel'),
+      addNode( wx, def.wheelR, -wz, wheelMass, 'wheel')
+    ];
+    this.nodes = nodes;
+    // renormalize chassis masses so the total is exactly def.mass
+    {
+      let sum = 0; const target = def.mass - wheelMass * 4;
+      for (const n of nodes) if (n.kind === 'chassis') sum += n.mass;
+      const f = target / sum;
+      for (const n of nodes) if (n.kind === 'chassis') n.mass *= f;
+    }
+    // beams: auto-connect chassis nodes within threshold (triangulated cage)
+    const beams = [], thr = Math.max(1.9, L*0.44); // threshold must reach the
+    // section-to-section DIAGONALS: with only straight longitudinal beams the
+    // cage has almost no torsional stiffness and the body twists in corners
+    // until a tall car trips over its own flex
+    const isWheel = i => nodes[i].kind==='wheel';
+    for (let i=0;i<nodes.length;i++){
+      if (isWheel(i)) continue;
+      for (let j=i+1;j<nodes.length;j++){
+        if (isWheel(j)) continue;
+        const A = nodes[i].rest, B = nodes[j].rest;
+        const dx=B.x-A.x, dy=B.y-A.y, dz=B.z-A.z, d = Math.sqrt(dx*dx+dy*dy+dz*dz);
+        if (d <= thr && d > 0.35){ // pairs closer than 0.35 m are near-duplicate
+          // nodes: a beam there sees enormous strain from tiny displacements
+          // and snaps under ordinary driving loads (the bumper-link bug)
+          const rm = 2*nodes[i].mass*nodes[j].mass/(nodes[i].mass+nodes[j].mass);
+          // crumple zones: beams touching the front/rear sections or bumpers
+          // are softer and break earlier — that is where a car is meant to fold.
+          // Mostly-vertical beams keep full stiffness: they carry the overhang's
+          // weight and must not let the nose droop; crush in a crash is
+          // longitudinal, so softening only the flat beams keeps the crumple.
+          const crumple = (idx)=> (idx < 8 || (idx >= 24 && idx <= 33));
+          const isCr = (crumple(i) || crumple(j)) && Math.abs(B.y-A.y)/d < 0.5;
+          const k = def.stiff * clamp(1.15 - d*0.12, 0.7, 1.15) * (isCr ? 0.28 : 1);
+          beams.push(new Beam(i, j, d, { k:k, c:0.12*2*Math.sqrt(k*rm),
+            deformStrain:(isCr ? 0.06 : 0.10),
+            breakStrain:(isCr ? 0.19 + hashN(i*31+j*17)*0.06 : 0.34 + hashN(i*31+j*17)*0.08) }));
         }
       }
     }
-    if (c.scrapeAcc > 0.25) {
-      events.push({ kind: EV.IMPACT, ckind: 0, x: c.x, z: c.z, speed: 3 + c.scrapeAcc * 5, closing: 1.5, rel: spdNow, abs: spdNow, lx: c.x > 0 ? 0.89 : -0.89, lz: 0 });
-      c.scrapeAcc = 0;
-    }
-  }
-  // circle colliders (trees, rocks, traffic, remote car)
-  for (const o of cols) {
-    if (o.h > 0 && c.y > o.y + o.h) continue;
-    for (let ci = 0; ci < 2; ci++) {
-      const off = ci === 0 ? 1.05 : -1.05;
-      const ccx = c.x + fx * off, ccz = c.z + fz * off;
-      const dx = ccx - o.x, dz = ccz - o.z;
-      const rr = o.r + 0.98, d2 = dx * dx + dz * dz;
-      if (d2 >= rr * rr || d2 < 1e-8) continue;
-      const d = Math.sqrt(d2), nx = dx / d, nz = dz / d, pen = rr - d;
-      c.x += nx * pen; c.z += nz * pen;
-      const rvx = c.vx - (o.moving ? o.vx : 0), rvz = c.vz - (o.moving ? o.vz : 0);
-      const vn = rvx * nx + rvz * nz;
-      if (vn < 0) {
-        const closing = -vn;
-        if (o.ramp > 0 && closing > 3 && !c.airborne) {
-          c.airborne = true;
-          c.vy = Math.min(24, closing * o.ramp + spdNow * o.ramp * 0.35);
-          c.vx *= 0.85; c.vz *= 0.85;
-          events.push({ kind: EV.LAUNCH, ckind: o.kind, x: ccx - nx * 0.5, z: ccz - nz * 0.5, nx, nz, speed: closing, closing, rel: spdNow, lx: (ccx - c.x) * rx + (ccz - c.z) * rz, lz: (ccx - c.x) * fx + (ccz - c.z) * fz });
-          continue;
-        }
-        c.vx -= nx * vn * 1.45; c.vz -= nz * vn * 1.45;
-        const lx = (ccx - c.x) * rx + (ccz - c.z) * rz;
-        const lz = (ccx - c.x) * fx + (ccz - c.z) * fz;
-        const tx = ccx - c.x, tz = ccz - c.z;
-        c.yawRate += (tz * (-nx * closing) - tx * (-nz * closing)) * 0.0016;
-        if (c.evCd <= 0) {
-          events.push({ kind: EV.IMPACT, ckind: o.kind, x: ccx - nx * 0.6, z: ccz - nz * 0.6, nx, nz, speed: closing, closing, rel: Math.hypot(rvx, rvz), abs: spdNow, lx, lz });
-          c.evCd = 0.08;
-        }
+    // explicit bumper rails: bumpers get stiff, non-crumple beams to the
+    // nearest section. On auto-beams alone the bumper hangs off long soft
+    // diagonals, starts swinging under driving vibration, the plastic
+    // ratchet feeds the swing, and the front clip gets tossed at speed.
+    for (const [bi, sec] of [[this.frontBumper, s0],[this.rearBumper, s3]]){
+      for (const ti of [sec.lowL, sec.lowR, sec.midL, sec.midR]){
+        const A = nodes[bi].rest, B = nodes[ti].rest;
+        const dx=B.x-A.x, dy=B.y-A.y, dz=B.z-A.z, d = Math.sqrt(dx*dx+dy*dy+dz*dz);
+        const rm = 2*nodes[bi].mass*nodes[ti].mass/(nodes[bi].mass+nodes[ti].mass);
+        const k = def.stiff * 0.85;
+        beams.push(new Beam(bi, ti, d, { k:k, c:0.15*2*Math.sqrt(k*rm),
+          deformStrain:0.09, breakStrain:0.30 }));
       }
     }
+    // suspension beams: each wheel to nearby chassis nodes
+    const suspTargets = [
+      [this.mountIdx[0], this.secIdx[0].lowL, this.secIdx[1].lowL, this.secIdx[1].midL, this.secIdx[1].lowR, this.secIdx[0].lowR],
+      [this.mountIdx[1], this.secIdx[0].lowR, this.secIdx[1].lowR, this.secIdx[1].midR, this.secIdx[1].lowL, this.secIdx[0].lowL],
+      [this.mountIdx[2], this.secIdx[3].lowL, this.secIdx[2].lowL, this.secIdx[2].midL, this.secIdx[2].lowR, this.secIdx[3].lowR],
+      [this.mountIdx[3], this.secIdx[3].lowR, this.secIdx[2].lowR, this.secIdx[2].midR, this.secIdx[2].lowL, this.secIdx[3].lowL]
+    ];
+    // (the last two targets of each wheel are cross-car track bars: without a
+    // stiff lateral link, a steered wheel just slides sideways in its soft
+    // longitudinal mounts and the chassis never receives the cornering force)
+    this.strutBeam = [];
+    this.wheelIdx.forEach((wi, w)=>{
+      suspTargets[w].forEach((ti, tiIdx)=>{
+        const A = nodes[wi].rest, B = nodes[ti].rest;
+        const dx=B.x-A.x, dy=B.y-A.y, dz=B.z-A.z, d = Math.sqrt(dx*dx+dy*dy+dz*dz);
+        const rm = 2*nodes[wi].mass*nodes[ti].mass/(nodes[wi].mass+nodes[ti].mass);
+        const kk = def.suspK * (tiIdx===0 ? 1.8 : 1); // first target = vertical strut
+        if (tiIdx===0) this.strutBeam[w] = beams.length;
+        beams.push(new Beam(wi, ti, d, { k:kk, c:0.7*2*Math.sqrt(kk*rm),
+          deformStrain:0.3, breakStrain:0.75, suspension:true }));
+      });
+    });
+    this.beams = beams;
+    this.frontNodes = [this.frontBumper, s0.lowL, s0.lowR, s0.midL, s0.midR];
+    this.rearNodes = [this.rearBumper, s3.lowL, s3.lowR, s3.midL, s3.midR];
   }
-
-  // engine temperature + fuel
-  {
-    const load = (0.25 + 0.75 * throttle) * (0.4 + 0.6 * (c.rpm / 7200));
-    const heatIn = c.dead ? 0 : load * 9 * (0.55 + 0.45 * (1 - c.part[PART.ENGINE] / 100));
-    const airflow = Math.min(1, Math.abs(vf) / 22);
-    const coolRate = (0.16 + 0.84 * (c.part[PART.RADIATOR] / 100)) * (0.35 + 0.65 * airflow);
-    const coolOut = (c.engineTemp - 28) * 0.11 * coolRate;
-    c.engineTemp += (heatIn - coolOut) * dt;
-    if (c.engineTemp < 28) c.engineTemp = 28;
-    const leak = c.part[PART.FUELTANK] < 60 ? 1 + (60 - c.part[PART.FUELTANK]) * 0.12 : 1;
-    if (!c.dead) c.fuel -= dt * (0.00035 + throttle * 0.0011) * leak;
-    if (c.fuel < 0) c.fuel = 0;
-  }
-  // overall cosmetic damage
-  {
-    const W = [0.12, 0.20, 0.10, 0.08, 0.07, 0.07, 0.07, 0.07, 0.10, 0.08];
-    let sum = 0, wsum = 0;
-    for (let i = 0; i < 10; i++) { sum += c.part[i] * W[i]; wsum += W[i]; }
-    c.damage = 100 - sum / wsum;
-  }
-}
-
-function applyPartDamage(c, ev) {
-  const s = ev.closing;
-  if (ev.kind === EV.LANDING) {
-    const imp = ev.speed;
-    if (!c.dead && imp >= 24) { c.dead = 1; c.deadReason = DEAD.FALL; }
-    if (imp > 6) {
-      const d = (imp - 6) * 0.9;
-      c.part[PART.TIRE_FL] -= d; c.part[PART.TIRE_FR] -= d;
-      c.part[PART.TIRE_RL] -= d; c.part[PART.TIRE_RR] -= d;
+  /* pose helpers */
+  setPoseFrame(cx, cy, cz, right, up, fwd, vx, vy, vz){
+    for (const n of this.nodes){
+      n.pos.x = cx + right.x*n.rest.x + up.x*n.rest.y + fwd.x*n.rest.z;
+      n.pos.y = cy + right.y*n.rest.x + up.y*n.rest.y + fwd.y*n.rest.z;
+      n.pos.z = cz + right.z*n.rest.x + up.z*n.rest.y + fwd.z*n.rest.z;
+      n.vel.x = vx||0; n.vel.y = vy||0; n.vel.z = vz||0;
     }
-    if (imp > 14) c.part[PART.ENGINE] -= (imp - 14) * 0.4;
-    if (imp > 12) c.part[PART.RADIATOR] -= (imp - 12) * 0.3;
-  } else if (ev.kind === EV.IMPACT) {
-    if (!c.dead && s >= 27) { c.dead = 1; c.deadReason = DEAD.CRASH; }
-    if (s > 2.2) {
-      const db = s - 2, lx = ev.lx, lz = ev.lz;
-      if (lz > 0.9) {
-        c.part[PART.RADIATOR] -= db * 2.4; c.part[PART.ENGINE] -= db * 1.15;
-        c.part[PART.TRANS] -= db * 0.3; c.part[PART.STEERING] -= db * 0.55;
-        if (lx > 0) c.part[PART.TIRE_FR] -= db; else c.part[PART.TIRE_FL] -= db;
-      } else if (lz < -0.9) {
-        c.part[PART.FUELTANK] -= db * 2; c.part[PART.TRANS] -= db * 0.2;
-        if (lx > 0) c.part[PART.TIRE_RR] -= db; else c.part[PART.TIRE_RL] -= db;
-      } else if (Math.abs(lx) > 0.45) {
-        const front = lz > 0;
-        if (lx > 0) c.part[front ? PART.TIRE_FR : PART.TIRE_RR] -= db * 1.7;
-        else c.part[front ? PART.TIRE_FL : PART.TIRE_RL] -= db * 1.7;
-        if (front) c.part[PART.STEERING] -= db * 0.5;
-        c.part[PART.BRAKES] -= db * 0.25;
+    this.lastCenter = { x:cx, y:cy, z:cz };
+  }
+  placeOnTrack(world, s, lateral){
+    const p = world.trackPoint(s);
+    const fx = Math.sin(p.heading), fz = Math.cos(p.heading);
+    const rx = Math.cos(p.heading), rz = -Math.sin(p.heading);
+    const cx = p.x + rx*(lateral||0), cz = p.z + rz*(lateral||0);
+    const gh = world.heightAtSL(s, lateral||0).h;
+    this.setPoseFrame(cx, gh, cz, {x:rx,y:0,z:rz}, {x:0,y:1,z:0}, {x:fx,y:0,z:fz}, 0,0,0);
+    this.sHint = s; this.distance = 0;
+  }
+  setVelocity(vx, vy, vz){ for (const n of this.nodes){ n.vel.x=vx; n.vel.y=vy; n.vel.z=vz; } }
+  center(){ let x=0,y=0,z=0; for (const n of this.nodes){ x+=n.pos.x; y+=n.pos.y; z+=n.pos.z; }
+    const m = 1/this.nodes.length; return { x:x*m, y:y*m, z:z*m }; }
+  centerVel(){ let x=0,y=0,z=0; for (const n of this.nodes){ x+=n.vel.x; y+=n.vel.y; z+=n.vel.z; }
+    const m = 1/this.nodes.length; return { x:x*m, y:y*m, z:z*m }; }
+  frame(){
+    const F = this.nodes[this.frontBumper].pos, R = this.nodes[this.rearBumper].pos;
+    let fx = F.x-R.x, fy = F.y-R.y, fz = F.z-R.z;
+    let fl = Math.sqrt(fx*fx+fy*fy+fz*fz)||1; fx/=fl; fy/=fl; fz/=fl;
+    const T = this.nodes[this.secIdx[1].topC].pos, B = this.nodes[this.secIdx[1].floorC].pos;
+    let ux = T.x-B.x, uy = T.y-B.y, uz = T.z-B.z;
+    // right = up0 x fwd ; then true up = fwd x right
+    let rx = uy*fz-uz*fy, ry = uz*fx-ux*fz, rz = ux*fy-uy*fx;
+    let rl = Math.sqrt(rx*rx+ry*ry+rz*rz)||1; rx/=rl; ry/=rl; rz/=rl;
+    const upx = fy*rz-fz*ry, upy = fz*rx-fx*rz, upz = fx*ry-fy*rx;
+    return { fwd:{x:fx,y:fy,z:fz}, right:{x:rx,y:ry,z:rz}, up:{x:upx,y:upy,z:upz} };
+  }
+  speed(){ const v = this.centerVel(); return Math.sqrt(v.x*v.x+v.y*v.y+v.z*v.z); }
+  forwardSpeed(){ const v = this.centerVel(), f = this.frame().fwd; return v.x*f.x+v.y*f.y+v.z*f.z; }
+  stats(){
+    let intact=0, deformed=0, broken=0;
+    for (const b of this.beams){ if (b.broken) broken++; else if (b.deformed) deformed++; else intact++; }
+    const total = this.beams.length;
+    return { intact:intact, deformed:deformed, broken:broken, total:total,
+             integrity: Math.round(100*(intact + deformed*0.55)/total) };
+  }
+  repair(){
+    for (const b of this.beams){ b.broken = false; b.deformed = false; b.currentRest = b.rest; b.maxStrain = 0; }
+    const c = this.center(), f = this.frame(), v = this.centerVel();
+    this.setPoseFrame(c.x, c.y, c.z, f.right, f.up, f.fwd, v.x, v.y, v.z);
+  }
+  maxNodeSpeed(){ let m=0; for (const n of this.nodes){ const s = Math.sqrt(n.vel.x*n.vel.x+n.vel.y*n.vel.y+n.vel.z*n.vel.z); if (s>m) m=s; } return m; }
+  hasNaN(){ for (const n of this.nodes){ if (!isFinite(n.pos.x+n.pos.y+n.pos.z+n.vel.x+n.vel.y+n.vel.z)) return true; } return false; }
+
+  step(dt, input, world){
+    if (!(dt > 0)) return;
+    if (dt > 0.05) dt = 0.05;
+    const SUB = 1/480;
+    const nSub = Math.max(1, Math.round(dt/SUB)), h = dt/nSub;
+    const c0 = this.center();
+    const nt = world.nearestTrack(c0.x, c0.z, this.sHint);
+    this.sHint = nt.s;
+    const obstacles = world.getObstacles(c0.x, c0.z, this.sHint);
+    if (this.hitCooldown > 0) this.hitCooldown -= dt;
+    if (this.groundHitCooldown > 0) this.groundHitCooldown -= dt;
+    for (let sIdx=0; sIdx<nSub; sIdx++) this.substep(h, input, world, obstacles);
+    const c1 = this.center();
+    if (this.lastCenter){
+      const dx=c1.x-this.lastCenter.x, dy=c1.y-this.lastCenter.y, dz=c1.z-this.lastCenter.z;
+      this.distance += Math.sqrt(dx*dx+dy*dy+dz*dz);
+    }
+    this.lastCenter = c1;
+  }
+  substep(h, input, world, obstacles){
+    const nodes = this.nodes, def = this.def;
+    const frame = this.frame();
+    const cv = this.centerVel();
+    const fSpeed = cv.x*frame.fwd.x + cv.y*frame.fwd.y + cv.z*frame.fwd.z;
+    // steer smoothing
+    const steerTarget = clamp(input.steer||0, -1, 1) * 0.5 * (1/(1+Math.abs(fSpeed)*0.038));
+    this.steerAngle += clamp(steerTarget - this.steerAngle, -3.2*h, 3.2*h);
+    // throttle tip-in smoothing (a step throttle input excites pitch oscillation)
+    if (this.throttleSm === undefined) this.throttleSm = 0;
+    const thrT = clamp(input.throttle||0, 0, 1);
+    this.throttleSm += clamp(thrT - this.throttleSm, -3.5*h, 3.5*h);
+    // forces
+    const F = new Array(nodes.length);
+    for (let i=0;i<nodes.length;i++) F[i] = { x:0, y:-9.81*nodes[i].mass, z:0 };
+    // beams
+    for (const b of this.beams){
+      if (b.broken) continue;
+      const A = nodes[b.a], B = nodes[b.b];
+      const dx = B.pos.x-A.pos.x, dy = B.pos.y-A.pos.y, dz = B.pos.z-A.pos.z;
+      const L = Math.sqrt(dx*dx+dy*dy+dz*dz); if (L < 1e-6) continue;
+      const ux = dx/L, uy = dy/L, uz = dz/L;
+      const rvx = B.vel.x-A.vel.x, rvy = B.vel.y-A.vel.y, rvz = B.vel.z-A.vel.z;
+      const rel = rvx*ux + rvy*uy + rvz*uz;
+      const f = b.k*(L - b.currentRest) + b.c*rel;
+      F[b.a].x += ux*f; F[b.a].y += uy*f; F[b.a].z += uz*f;
+      F[b.b].x -= ux*f; F[b.b].y -= uy*f; F[b.b].z -= uz*f;
+      if (!this.noDeform) b.checkDeform(nodes, h);
+    }
+    // (No anti-roll-bar coupling: an undamped differential spring between
+    // the struts resonated with the wheel-hop mode and made tall cars MORE
+    // likely to roll, not less. Roll stiffness comes from the struts and
+    // the triangulated body beams.)
+    // wheel contacts + driving
+    const totalMass = def.mass;
+    for (let w=0; w<4; w++){
+      const wi = this.wheelIdx[w], n = nodes[wi];
+      const gh = world.groundHeight(n.pos.x, n.pos.z, this.sHint);
+      const contact = (n.pos.y - gh.h) <= def.wheelR + 0.07;
+      this['contact'+w] = contact;
+      if (!contact) continue;
+      const isFront = w < 2;
+      const driven = def.drive==='4WD' || (def.drive==='FWD' && isFront) || (def.drive==='RWD' && !isFront);
+      const sa = isFront ? this.steerAngle : 0;
+      // wheel rolling direction (car fwd rotated by steer, in world)
+      let dx = frame.fwd.x*Math.cos(sa) - frame.right.x*Math.sin(sa);
+      let dy = frame.fwd.y*Math.cos(sa) - frame.right.y*Math.sin(sa);
+      let dz = frame.fwd.z*Math.cos(sa) - frame.right.z*Math.sin(sa);
+      // project onto ground plane
+      const dn = dx*gh.normal.x + dy*gh.normal.y + dz*gh.normal.z;
+      dx -= gh.normal.x*dn; dy -= gh.normal.y*dn; dz -= gh.normal.z*dn;
+      const dl = Math.sqrt(dx*dx+dy*dy+dz*dz); if (dl < 1e-5) continue;
+      dx/=dl; dy/=dl; dz/=dl;
+      let mu = gh.surface==='road'?1.05 : gh.surface==='grass'?0.62 : gh.surface==='rock'?0.45 : 0.6;
+      const slopeDeg = gh.slope*57.2958;
+      if (slopeDeg > 35) mu *= 0.16; else if (slopeDeg > 20) mu *= lerp(1, 0.16, (slopeDeg-20)/15);
+      const load = totalMass*9.81/4;
+      const loadMass = totalMass/4; // tire forces scale with the load the
+      // wheel carries, not the light wheel node's own mass — otherwise yaw
+      // damping and cornering grip are ~25x too weak and the car spins
+      // lateral grip: kill velocity sideways to the rolling direction
+      const vLatX = n.vel.x - dx*(n.vel.x*dx+n.vel.y*dy+n.vel.z*dz) - gh.normal.x*(n.vel.x*gh.normal.x+n.vel.y*gh.normal.y+n.vel.z*gh.normal.z);
+      const vLatY = n.vel.y - dy*(n.vel.x*dx+n.vel.y*dy+n.vel.z*dz) - gh.normal.y*(n.vel.x*gh.normal.x+n.vel.y*gh.normal.y+n.vel.z*gh.normal.z);
+      const vLatZ = n.vel.z - dz*(n.vel.x*dx+n.vel.y*dy+n.vel.z*dz) - gh.normal.z*(n.vel.x*gh.normal.x+n.vel.y*gh.normal.y+n.vel.z*gh.normal.z);
+      let gripRate = gh.surface==='road'?9:6;
+      if (input.handbrake && !isFront) gripRate *= 0.3;
+      let gx = -vLatX*loadMass*gripRate, gy = -vLatY*loadMass*gripRate, gz = -vLatZ*loadMass*gripRate;
+      const gl = Math.sqrt(gx*gx+gy*gy+gz*gz), gCap = mu*load*0.9; // lateral
+      // grip saturates below every car's roll threshold: tires slide before
+      // the car can trip over its own cornering force on flat ground
+      if (gl > gCap && gl > 0){ const sc = gCap/gl; gx*=sc; gy*=sc; gz*=sc; }
+      // split between the wheel node and its strut mount: the suspension
+      // transmits this force to the chassis anyway, and applying it all to
+      // the 13 kg wheel node makes the response numerically stiff and
+      // starves the chassis of yaw damping (fishtailing)
+      F[wi].x += gx*0.4; F[wi].y += gy*0.4; F[wi].z += gz*0.4;
+      const mi = this.mountIdx[w];
+      F[mi].x += gx*0.6; F[mi].y += gy*0.6; F[mi].z += gz*0.6;
+      // longitudinal
+      const vF = n.vel.x*dx + n.vel.y*dy + n.vel.z*dz;
+      const nDriven = def.drive==='4WD'?4:2;
+      if (driven && this.throttleSm > 0){
+        let f = this.throttleSm * Math.min(def.engineForce, def.power/Math.max(4, Math.abs(fSpeed))) / nDriven;
+        f = Math.min(f, mu*load);
+        // half the drive force enters at the strut mount (chassis height):
+        // applying it all at the light wheel node surges the wheel and
+        // drags the nose down through the diagonal suspension links
+        const mi = this.mountIdx[w];
+        F[wi].x += dx*f*0.5; F[wi].y += dy*f*0.5; F[wi].z += dz*f*0.5;
+        F[mi].x += dx*f*0.5; F[mi].y += dy*f*0.5; F[mi].z += dz*f*0.5;
+      }
+      if (driven && input.reverse > 0){
+        let f = input.reverse * def.engineForce*0.45 / nDriven;
+        f = Math.min(f, mu*load);
+        if (vF > 0.5){ const bf = Math.min(vF*loadMass*6, mu*load*1.4); F[wi].x -= dx*bf; F[wi].y -= dy*bf; F[wi].z -= dz*bf; }
+        else { F[wi].x -= dx*f; F[wi].y -= dy*f; F[wi].z -= dz*f; }
+      } else if (input.brake){
+        const bf = clamp(-vF*loadMass*6, -mu*load*1.5, mu*load*1.5);
+        F[wi].x += dx*bf; F[wi].y += dy*bf; F[wi].z += dz*bf;
+      }
+      if (input.handbrake && !isFront){
+        const bf = clamp(-vF*loadMass*5, -mu*load*1.3, mu*load*1.3);
+        F[wi].x += dx*bf; F[wi].y += dy*bf; F[wi].z += dz*bf;
+      }
+      if (!input.throttle && !input.reverse && !input.brake){
+        // parking hold at crawl speed (spring-like, capped by traction);
+        // above crawl, rolling resistance is a small ~constant force —
+        // a velocity-proportional force scaled by load mass would brake
+        // the car at ~9 m/s^2 and ruin every crash run-up
+        let rf;
+        if (Math.abs(vF) < 2.5) rf = clamp(-vF * loadMass * 8, -mu*load*1.2, mu*load*1.2);
+        else rf = -Math.sign(vF) * (0.012*load + Math.abs(vF)*6);
+        F[wi].x += dx*rf; F[wi].y += dy*rf; F[wi].z += dz*rf;
       } else {
-        c.part[PART.ENGINE] -= db * 0.35; c.part[PART.RADIATOR] -= db * 0.4;
+        const rf = -clamp(vF * 30, -42, 42);
+        F[wi].x += dx*rf; F[wi].y += dy*rf; F[wi].z += dz*rf;
       }
-      if (s > 13 && lz > 0) c.part[PART.ENGINE] -= (s - 13) * 0.8;
-      c.steerPull = clamp(c.steerPull - lx * 0.0035 * Math.min(s, 12) / (Math.abs(lx) + 0.5), -0.07, 0.07);
-    } else if (s > 0.5) {
-      const idx = (ev.lx > 0) ? (ev.lz > 0 ? PART.TIRE_FR : PART.TIRE_RR) : (ev.lz > 0 ? PART.TIRE_FL : PART.TIRE_RL);
-      c.part[idx] -= 0.4;
+      this.wheelSpin[w] += (vF/def.wheelR)*h;
+    }
+    // aero drag (on the shared center velocity, spread over nodes)
+    const spd = Math.sqrt(cv.x*cv.x+cv.y*cv.y+cv.z*cv.z);
+    if (spd > 0.1){
+      const dragA = def.drag * spd; // accel per unit velocity
+      for (let i=0;i<nodes.length;i++){ F[i].x -= cv.x*dragA*nodes[i].mass; F[i].y -= cv.y*dragA*nodes[i].mass*0.3; F[i].z -= cv.z*dragA*nodes[i].mass; }
+    }
+    // integrate
+    for (let i=0;i<nodes.length;i++){
+      const n = nodes[i], im = h/n.mass;
+      n.vel.x += F[i].x*im; n.vel.y += F[i].y*im; n.vel.z += F[i].z*im;
+      // safety clamp: the sim must never explode
+      const sv = Math.sqrt(n.vel.x*n.vel.x+n.vel.y*n.vel.y+n.vel.z*n.vel.z);
+      if (sv > 90){ const sc = 90/sv; n.vel.x*=sc; n.vel.y*=sc; n.vel.z*=sc; }
+      n.pos.x += n.vel.x*h; n.pos.y += n.vel.y*h; n.pos.z += n.vel.z*h;
+    }
+    // collisions
+    for (let i=0;i<nodes.length;i++){
+      const n = nodes[i];
+      const gh = world.groundHeight(n.pos.x, n.pos.z, this.sHint);
+      const pen = (gh.h + n.radius) - n.pos.y;
+      if (pen > 0){
+        const nn = gh.normal;
+        if (nn.y > 0.35){ n.pos.y += pen; }
+        else { n.pos.x += nn.x*pen; n.pos.z += nn.z*pen; n.pos.y += nn.y*pen; }
+        const vn = n.vel.x*nn.x + n.vel.y*nn.y + n.vel.z*nn.z;
+        if (vn < -4.5 && n.kind !== 'wheel' && this.groundHitCooldown <= 0){ this.groundHits++; this.groundHitCooldown = 0.3; }
+        if (vn < 0){ n.vel.x -= nn.x*vn; n.vel.y -= nn.y*vn; n.vel.z -= nn.z*vn; }
+        // tangential friction as a RATE (per second), not per substep —
+        // a per-substep fraction at 480 Hz would act like a brake on everything
+        const fr = n.kind==='wheel' ? Math.min(1, 1.2*h) : Math.min(1, 12*h);
+        const vn2 = n.vel.x*nn.x + n.vel.y*nn.y + n.vel.z*nn.z;
+        n.vel.x -= (n.vel.x - nn.x*vn2)*fr; n.vel.y -= (n.vel.y - nn.y*vn2)*fr; n.vel.z -= (n.vel.z - nn.z*vn2)*fr;
+      }
+      // obstacles: vertical cylinders
+      for (const o of obstacles){
+        if (n.pos.y > gh.h + o.h + n.radius) continue;
+        const dx = n.pos.x-o.x, dz = n.pos.z-o.z;
+        const rr = o.r + n.radius, d2 = dx*dx+dz*dz;
+        if (d2 >= rr*rr || d2 < 1e-9) continue;
+        const d = Math.sqrt(d2), nx = dx/d, nz = dz/d, push = (rr-d)*0.55;
+        // penalty-style contact: resolve ~55% of penetration and inward
+        // velocity per substep instead of a rigid projection. A perfectly
+        // rigid contact absorbs the whole crash into the constraint and the
+        // beams never get to crush; a slightly soft contact lets the
+        // structure do the absorbing (equilibrium penetration at 100 km/h
+        // is ~0.1 m, far less than any obstacle radius — no tunnelling)
+        n.pos.x += nx*push; n.pos.z += nz*push;
+        const vn = n.vel.x*nx + n.vel.z*nz;
+        if (vn < 0){
+          n.vel.x -= nx*vn*0.55; n.vel.z -= nz*vn*0.55;
+          // tangential scrape friction (rate-scaled)
+          const sf = 1 - Math.min(0.5, 25*h);
+          n.vel.x *= sf; n.vel.z *= sf;
+          if (vn < -3 && this.hitCooldown <= 0){ this.obstacleHits++; this.hitCooldown = 0.25; }
+        }
+      }
     }
   }
-  for (let i = 0; i < 10; i++) c.part[i] = clamp(c.part[i], 0, 100);
 }
+function spawnCar(defId, world, s){
+  const def = CAR_DEFS.find(d=>d.id===defId) || CAR_DEFS[0];
+  const car = new SoftBodyCar(def, world);
+  car.placeOnTrack(world, (s===undefined?100:s), 0);
+  // pre-settle the suspension with damage recording off, so a freshly
+  // spawned car is at equilibrium with a genuinely untouched structure
+  car.noDeform = true;
+  const idle = { throttle:0, reverse:0, brake:0, steer:0, handbrake:0 };
+  for (let i=0;i<90;i++) car.step(1/60, idle, world);
+  car.noDeform = false;
+  car.setVelocity(0,0,0);
+  return car;
+}
+if (typeof globalThis !== 'undefined'){
+  globalThis.__SIM = { TrackWorld:TrackWorld, SoftBodyCar:SoftBodyCar, Beam:Beam, CAR_DEFS:CAR_DEFS,
+    spawnCar:spawnCar, ROAD_HALF:ROAD_HALF, CLIFF_FIRST:CLIFF_FIRST, CLIFF_PERIOD:CLIFF_PERIOD, CLIFF_LEN:CLIFF_LEN };
+}
+// === SIM CORE END ===
+</script>
+<script>
+/* ============================ RENDERING ============================ */
+const S = globalThis.__SIM;
+const world = new S.TrackWorld(1337);
+let car = null, carDef = null, lastDt = 1/60;
 
-// ================================================================
-// RENDERING (Three.js)
-// ================================================================
-const container = document.getElementById('game');
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-renderer.setSize(innerWidth, innerHeight);
-container.appendChild(renderer.domElement);
-
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio||1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.getElementById('game').appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87b5d9);
-scene.fog = new THREE.Fog(0x87b5d9, 70, 460);
-const camera = new THREE.PerspectiveCamera(66, innerWidth / innerHeight, 0.1, 1200);
+scene.fog = new THREE.Fog(0x87b5d9, 120, 420);
+const camera = new THREE.PerspectiveCamera(66, window.innerWidth/window.innerHeight, 0.1, 900);
+scene.add(new THREE.HemisphereLight(0xcfe8ff, 0x4a5a3a, 0.95));
+const sun = new THREE.DirectionalLight(0xfff2d8, 0.85);
+sun.position.set(60, 120, 40); scene.add(sun);
+window.addEventListener('resize', ()=>{
+  camera.aspect = window.innerWidth/window.innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
 
-const hemi = new THREE.HemisphereLight(0xcfe5ff, 0x3a5f2f, 0.95);
-scene.add(hemi);
-const sun = new THREE.DirectionalLight(0xfff2d8, 1.35);
-scene.add(sun); scene.add(sun.target);
-
-// shared materials
-const M = {
-  asphalt: new THREE.MeshLambertMaterial({ color: 0x2f3036 }),
-  shoulder: new THREE.MeshLambertMaterial({ color: 0x55565c }),
-  lineW: new THREE.MeshBasicMaterial({ color: 0xf2f2ee }),
-  lineY: new THREE.MeshBasicMaterial({ color: 0xf5d76a }),
-  grassA: new THREE.MeshLambertMaterial({ color: 0x3e7a33 }),
-  grassB: new THREE.MeshLambertMaterial({ color: 0x468740 }),
-  rail: new THREE.MeshLambertMaterial({ color: 0x9aa3ab }),
-  trunk: new THREE.MeshLambertMaterial({ color: 0x6b4a2b }),
-  pine: new THREE.MeshLambertMaterial({ color: 0x1f5c2e }),
-  blob: new THREE.MeshLambertMaterial({ color: 0x3f9142 }),
-  blobB: new THREE.MeshLambertMaterial({ color: 0xc2703d }),
-  rock: new THREE.MeshLambertMaterial({ color: 0x8a8d90 }),
-  water: new THREE.MeshLambertMaterial({ color: 0x2b6cb0, transparent: true, opacity: 0.82 }),
-  lakebed: new THREE.MeshLambertMaterial({ color: 0x27567f }),
-  mountain: new THREE.MeshLambertMaterial({ color: 0x6d7f8e }),
-  tire: new THREE.MeshLambertMaterial({ color: 0x17181a }),
-  glass: new THREE.MeshLambertMaterial({ color: 0x1c2733 }),
-  dash: new THREE.MeshLambertMaterial({ color: 0x14161a }),
+/* ---------- geometry bucket builder (car-local coords) ---------- */
+function Bucket(){ this.pos = []; this.nor = []; }
+Bucket.prototype.quad = function(a,b,c,d,n){
+  const p = this.pos, nr = this.nor;
+  p.push(a[0],a[1],a[2], b[0],b[1],b[2], c[0],c[1],c[2], a[0],a[1],a[2], c[0],c[1],c[2], d[0],d[1],d[2]);
+  for (let i=0;i<6;i++) nr.push(n[0],n[1],n[2]);
+};
+Bucket.prototype.prism = function(zF, zB, wF, wB, yBotF, yBotB, yTopF, yTopB, xF, xB){
+  xF = xF||0; xB = xB||0;
+  const FL=[xF-wF,yBotF,zF], FR=[xF+wF,yBotF,zF], BL=[xB-wB,yBotB,zB], BR=[xB+wB,yBotB,zB];
+  const FLt=[xF-wF*0.92,yTopF,zF], FRt=[xF+wF*0.92,yTopF,zF], BLt=[xB-wB*0.92,yTopB,zB], BRt=[xB+wB*0.92,yTopB,zB];
+  this.quad(FLt,FRt,BRt,BLt,[0,1,0]);            // top
+  this.quad(BL,BR,FR,FL,[0,-1,0]);               // bottom
+  this.quad(FR,BR,BRt,FRt,[1,0,0]);              // right
+  this.quad(BL,FL,FLt,BLt,[-1,0,0]);             // left
+  this.quad(FL,FR,FRt,FLt,[0,0,1]);              // front
+  this.quad(BR,BL,BLt,BRt,[0,0,-1]);             // back
+};
+Bucket.prototype.box = function(cx,cy,cz,sx,sy,sz){
+  this.prism(cz+sz/2, cz-sz/2, sx/2, sx/2, cy-sy/2, cy-sy/2, cy+sy/2, cy+sy/2, cx, cx);
 };
 
-// tiny geometry merger (non-indexed concat with a matrix applied)
-function mergeGeo(parts) {
-  let total = 0;
-  const prepped = parts.map(({ geo, mtx }) => {
-    const g = geo.index ? geo.toNonIndexed() : geo.clone();
-    g.applyMatrix4(mtx);
-    total += g.attributes.position.count;
-    return g;
-  });
-  const pos = new Float32Array(total * 3), nor = new Float32Array(total * 3);
-  let o = 0;
-  for (const g of prepped) {
-    pos.set(g.attributes.position.array, o * 3);
-    nor.set(g.attributes.normal.array, o * 3);
-    o += g.attributes.position.count;
+/* ---------- car body plan per type ---------- */
+function buildBuckets(def){
+  const B = { paint:new Bucket(), accent:new Bucket(), glass:new Bucket(),
+              lightF:new Bucket(), lightR:new Bucket(), dark:new Bucket() };
+  const L = def.length, W = def.width, sec = def.sections;
+  const zS = i => sec[i].z*L;
+  const cabTop = sec[1].yTop, hoodTop = sec[0].yTop, rearTop = sec[3].yTop;
+  // belly + lower body
+  B.paint.prism(L*0.53, -L*0.53, W*0.47, W*0.47, 0.30, 0.32, sec[0].yMid+0.05, sec[3].yMid+0.05);
+  B.dark.prism(L*0.50, -L*0.50, W*0.44, W*0.44, 0.16, 0.16, 0.31, 0.31); // underbody shadow line
+  // hood (sloped prism)
+  B.paint.prism(L*0.53, zS(1)+0.1, W*0.45, W*0.47, sec[0].yMid-0.05, sec[1].yMid-0.02, hoodTop, sec[1].yMid+0.18);
+  // fenders over the wheels
+  const wz = def.wheelBase*L*0.5, wx = def.trackW*W*0.5;
+  for (const sx of [-1,1]) for (const sz of [-1,1]){
+    B.paint.box(sx*(wx+0.02), def.wheelR+0.30, sz*wz, 0.30, 0.16, def.wheelR*2+0.34);
+    B.dark.box(sx*(wx+0.10), def.wheelR+0.30, sz*wz, 0.10, 0.18, def.wheelR*2+0.40); // arch trim
   }
-  const out = new THREE.BufferGeometry();
-  out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  out.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
-  return out;
-}
-const mat4 = (x, y, z, ry = 0, sx = 1, sy = 1, sz = 1) => {
-  const m = new THREE.Matrix4();
-  m.compose(new THREE.Vector3(x, y, z), new THREE.Quaternion().setFromEuler(new THREE.Euler(0, ry, 0)), new THREE.Vector3(sx, sy, sz));
-  return m;
-};
-
-// ---------- car mesh ----------
-function buildCarMesh(colorHex, withDeform) {
-  const group = new THREE.Group();
-  const bodyG = new THREE.Group();
-  group.add(bodyG);
-  const paint = new THREE.MeshLambertMaterial({ color: colorHex });
-  const bodyGeo = new THREE.BoxGeometry(1.78, 0.52, 4.1, 6, 2, 12);
-  const body = new THREE.Mesh(bodyGeo, paint);
-  body.position.y = 0.52;
-  bodyG.add(body);
-  const hoodGeo = new THREE.BoxGeometry(1.7, 0.2, 1.0);
-  const hood = new THREE.Mesh(hoodGeo, paint);
-  hood.position.set(0, 0.72, 1.45);
-  bodyG.add(hood);
-  const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.58, 0.5, 1.9), M.glass);
-  cabin.position.set(0, 0.98, -0.25);
-  bodyG.add(cabin);
-  const wheelGeo = new THREE.CylinderGeometry(0.33, 0.33, 0.24, 14);
-  wheelGeo.rotateZ(Math.PI / 2);
-  const wheels = [];
-  for (const [wx, wz] of [[-0.82, 1.35], [0.82, 1.35], [-0.82, -1.35], [0.82, -1.35]]) {
-    const w = new THREE.Mesh(wheelGeo, M.tire);
-    w.position.set(wx, 0.33, wz);
-    bodyG.add(w); wheels.push(w);
-  }
-  // soft blob shadow
-  const sh = new THREE.Mesh(new THREE.CircleGeometry(2.6, 20), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.28 }));
-  sh.rotation.x = -Math.PI / 2; sh.position.y = 0.015; sh.scale.set(0.75, 1.15, 1);
-  group.add(sh);
-  let deform = null;
-  if (withDeform) {
-    const p = bodyGeo.attributes.position;
-    deform = { orig: new Float32Array(p.array), def: new Float32Array(p.count * 3), geo: bodyGeo };
-  }
-  return { group, bodyG, wheels, deform, bodyMesh: body };
-}
-// port of ed_deform_vertices, in car-local space
-function applyDeform(carMesh, lx, lz, dirx, dirz, strength) {
-  const d = carMesh.deform; if (!d) return;
-  const cx = lx * 0.89, cy = 0.52, cz = lz;
-  const radius = 1.15, r2 = radius * radius;
-  const p = d.geo.attributes.position;
-  for (let vi = 0; vi < p.count; vi++) {
-    const i = vi * 3;
-    const vx = d.orig[i] - cx, vy = d.orig[i + 1] - cy, vz = d.orig[i + 2] - cz;
-    const d2 = vx * vx + vy * vy + vz * vz;
-    if (d2 > r2) continue;
-    const dist = Math.sqrt(d2);
-    const fall = 1 - dist / radius;
-    const ripple = 0.82 + 0.36 * Math.sin(dist * 21 + ((vi + 7) % 17) * 0.83);
-    const amt = strength * fall * fall * ripple;
-    d.def[i] = clamp(d.def[i] + dirx * amt, -0.5, 0.5);
-    d.def[i + 1] = clamp(d.def[i + 1], -0.5, 0.5);
-    d.def[i + 2] = clamp(d.def[i + 2] + dirz * amt, -0.5, 0.5);
-    p.array[i] = d.orig[i] + d.def[i];
-    p.array[i + 1] = d.orig[i + 1] + d.def[i + 1];
-    p.array[i + 2] = d.orig[i + 2] + d.def[i + 2];
-  }
-  p.needsUpdate = true;
-  d.geo.computeVertexNormals();
-}
-
-// ---------- world chunks ----------
-const chunks = new Map(); // idx -> {group, colliders[]}
-const trunkGeo = new THREE.CylinderGeometry(0.16, 0.24, 1.6, 6);
-const pineGeo = new THREE.ConeGeometry(1.5, 3.6, 8);
-const blobGeo = new THREE.SphereGeometry(1.6, 8, 6);
-const rockGeo = new THREE.DodecahedronGeometry(1, 0);
-
-function buildChunk(idx) {
-  const z0 = idx * CHUNK;
-  const g = new THREE.Group();
-  const colliders = [];
-  const add = (geo, material, m) => { const mesh = new THREE.Mesh(geo, material); mesh.applyMatrix4(m); g.add(mesh); return mesh; };
-  // road — every chunk is identical in cross-section, so edges always meet
-  add(new THREE.PlaneGeometry(ROAD_HALF * 2, CHUNK), M.asphalt, new THREE.Matrix4().makeRotationX(-Math.PI / 2).setPosition(0, 0.02, z0 + CHUNK / 2));
-  for (const s of [-1, 1]) {
-    add(new THREE.PlaneGeometry(1.7, CHUNK), M.shoulder, new THREE.Matrix4().makeRotationX(-Math.PI / 2).setPosition(s * (ROAD_HALF + 0.85), 0.01, z0 + CHUNK / 2));
-    add(new THREE.PlaneGeometry(90, CHUNK), (idx % 2 === 0) ? M.grassA : M.grassB, new THREE.Matrix4().makeRotationX(-Math.PI / 2).setPosition(s * (ROAD_HALF + 1.7 + 45), 0, z0 + CHUNK / 2));
-    add(new THREE.PlaneGeometry(0.18, CHUNK), M.lineW, new THREE.Matrix4().makeRotationX(-Math.PI / 2).setPosition(s * 4.85, 0.045, z0 + CHUNK / 2));
-    // guardrail: top rail + skirt, continuous boxes per chunk
-    add(new THREE.BoxGeometry(0.16, 0.26, CHUNK), M.rail, mat4(s * BARRIER_OFF, 0.66, z0 + CHUNK / 2));
-    add(new THREE.BoxGeometry(0.1, 0.3, CHUNK), M.rail, mat4(s * BARRIER_OFF, 0.3, z0 + CHUNK / 2));
-  }
-  for (let k = 0; k < 10; k++) {
-    add(new THREE.PlaneGeometry(0.22, 3), M.lineY, new THREE.Matrix4().makeRotationX(-Math.PI / 2).setPosition(0, 0.045, z0 + k * 6 + 1.5));
-  }
-  // lakes whose center falls in this chunk
-  for (const L of lakesNear(z0 + CHUNK / 2)) {
-    if (Math.floor(L.z / CHUNK) !== idx) continue;
-    add(new THREE.CircleGeometry(L.r, 26), M.lakebed, new THREE.Matrix4().makeRotationX(-Math.PI / 2).setPosition(L.x, 0.04, L.z));
-    add(new THREE.CircleGeometry(L.r, 26), M.water, new THREE.Matrix4().makeRotationX(-Math.PI / 2).setPosition(L.x, L.waterY, L.z));
-  }
-  // trees + rocks, merged per material
-  const trunks = [], pines = [], blobs = [], blobsB = [], rocks = [];
-  const inLake = (x, z) => lakesNear(z).some(L => Math.hypot(x - L.x, z - L.z) < L.r + 2.5);
-  for (let k = 0; k < 26; k++) {
-    const side = hash01(idx * 131.7 + k * 7.3) < 0.5 ? -1 : 1;
-    const x = side * (8.5 + hash01(idx * 57.1 + k * 3.9) * 55);
-    const z = z0 + hash01(idx * 91.3 + k * 5.1) * CHUNK;
-    if (inLake(x, z)) continue;
-    const s = 0.8 + hash01(idx * 31.7 + k) * 0.9;
-    trunks.push({ geo: trunkGeo, mtx: mat4(x, 0.8 * s, z, 0, s, s, s) });
-    if (hash01(idx * 17.9 + k * 11.3) < 0.55) pines.push({ geo: pineGeo, mtx: mat4(x, (1.6 + 1.8) * s, z, hash01(k) * 3, s, s, s) });
-    else (hash01(idx * 23.3 + k) < 0.25 ? blobsB : blobs).push({ geo: blobGeo, mtx: mat4(x, (1.6 + 1.3) * s, z, hash01(k * 3) * 3, s, s * 0.9, s) });
-    colliders.push({ x, z, r: 0.45, y: 0, h: 3.2, kind: 1, ramp: 0, moving: false, vx: 0, vz: 0 });
-  }
-  for (let k = 0; k < 5; k++) {
-    const side = hash01(idx * 41.3 + k * 13.7) < 0.5 ? -1 : 1;
-    const nearRoad = k === 0 && hash01(idx * 3.3) < 0.4;
-    const x = side * (nearRoad ? (7.6 + hash01(idx * 7.7) * 3.5) : (10 + hash01(idx * 13.1 + k) * 45));
-    const z = z0 + hash01(idx * 71.9 + k * 3.3) * CHUNK;
-    if (inLake(x, z)) continue;
-    const s = 0.7 + hash01(idx * 19.3 + k) * 1.1;
-    rocks.push({ geo: rockGeo, mtx: mat4(x, s * 0.45, z, hash01(k * 7) * 3, s, s * 0.75, s) });
-    colliders.push({ x, z, r: s * 0.95, y: 0, h: 1.1, kind: 2, ramp: nearRoad ? 0.9 : 0, moving: false, vx: 0, vz: 0 });
-  }
-  if (trunks.length) g.add(new THREE.Mesh(mergeGeo(trunks), M.trunk));
-  if (pines.length) g.add(new THREE.Mesh(mergeGeo(pines), M.pine));
-  if (blobs.length) g.add(new THREE.Mesh(mergeGeo(blobs), M.blob));
-  if (blobsB.length) g.add(new THREE.Mesh(mergeGeo(blobsB), M.blobB));
-  if (rocks.length) g.add(new THREE.Mesh(mergeGeo(rocks), M.rock));
-  scene.add(g);
-  return { group: g, colliders };
-}
-function ensureChunks(z) {
-  const mid = Math.floor(z / CHUNK);
-  for (let i = mid - 2; i <= mid + 11; i++) {
-    if (!chunks.has(i)) chunks.set(i, buildChunk(i));
-  }
-  for (const [i, ch] of chunks) {
-    if (i < mid - 3 || i > mid + 13) { scene.remove(ch.group); chunks.delete(i); }
-  }
-}
-function collidersNear(z) {
-  const out = [];
-  const mid = Math.floor(z / CHUNK);
-  for (let i = mid - 1; i <= mid + 2; i++) {
-    const ch = chunks.get(i); if (!ch) continue;
-    for (const c of ch.colliders) if (Math.abs(c.z - z) < 75) out.push(c);
-  }
-  return out;
-}
-// distant mountains: one merged ring segment that follows the camera
-const mountainGroup = (() => {
-  const parts = [];
-  for (let k = 0; k < 26; k++) {
-    const side = k % 2 === 0 ? -1 : 1;
-    const x = side * (230 + hash01(k * 3.7) * 160);
-    const z = -600 + k * 48 + hash01(k * 9.1) * 30;
-    const s = 60 + hash01(k * 5.3) * 90;
-    parts.push({ geo: new THREE.ConeGeometry(1, 1, 5), mtx: mat4(x, s * 0.32, z, hash01(k) * 3, s, s * 0.65, s) });
-  }
-  const mesh = new THREE.Mesh(mergeGeo(parts), M.mountain);
-  scene.add(mesh);
-  return mesh;
-})();
-
-// ---------- traffic ----------
-const traffic = [];
-const trafficColors = [0xd8d8d8, 0x3f6fb5, 0x777777, 0xb5a03f, 0x5f8f5a, 0x222226];
-function spawnTraffic(carZ, initial) {
-  const lane = hash01(carZ * 0.37 + traffic.length * 13.1) < 0.5 ? -2.6 : 2.6;
-  const z = carZ + (initial ? hash01(traffic.length * 7.7) * 500 : 260 + hash01(carZ * 1.3) * 240);
-  const cm = buildCarMesh(trafficColors[traffic.length % trafficColors.length], false);
-  scene.add(cm.group);
-  traffic.push({ mesh: cm, x: lane, z, speed: 17 + hash01(z * 3.1) * 8, wheelSpin: 0 });
-}
-function updateTraffic(dt, carZ) {
-  while (traffic.length < 6) spawnTraffic(carZ, carZ < 10);
-  for (let i = traffic.length - 1; i >= 0; i--) {
-    const t = traffic[i];
-    t.z += t.speed * dt;
-    t.wheelSpin += t.speed * dt / WHEEL_R;
-    if (t.z < carZ - 90 || t.z > carZ + 700) {
-      scene.remove(t.mesh.group); traffic.splice(i, 1); continue;
-    }
-    t.mesh.group.position.set(t.x, 0, t.z);
-    t.mesh.group.rotation.y = 0;
-    for (const w of t.mesh.wheels) w.rotation.x = t.wheelSpin;
-  }
-}
-function trafficColliders() {
-  return traffic.map(t => ({ x: t.x, z: t.z, r: 1.15, y: 0, h: 1.4, kind: 4, ramp: 0, moving: true, vx: 0, vz: t.speed }));
-}
-
-// ---------- cockpit ----------
-const gaugeCanvas = document.createElement('canvas');
-gaugeCanvas.width = 640; gaugeCanvas.height = 300;
-const gaugeCtx = gaugeCanvas.getContext('2d');
-const gaugeTex = new THREE.CanvasTexture(gaugeCanvas);
-const cockpit = new THREE.Group();
-{
-  const dash = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.34, 0.5), M.dash);
-  dash.position.set(0, 0.92, 0.95);
-  cockpit.add(dash);
-  const gaugePlane = new THREE.Mesh(new THREE.PlaneGeometry(1.15, 0.54), new THREE.MeshBasicMaterial({ map: gaugeTex }));
-  gaugePlane.position.set(0, 1.0, 0.72);
-  gaugePlane.lookAt(0, 1.2, -1); // textured face toward the driver's eyes
-  cockpit.add(gaugePlane);
-  const wheel = new THREE.Mesh(new THREE.TorusGeometry(0.21, 0.028, 8, 20), M.dash);
-  wheel.position.set(-0.38, 0.86, 0.68);
-  wheel.rotation.x = -0.5;
-  cockpit.add(wheel);
-  const pillar = new THREE.Mesh(new THREE.BoxGeometry(1.74, 0.09, 2.2), M.dash);
-  pillar.position.set(0, 1.42, 0.1);
-  cockpit.add(pillar);
-  cockpit.visible = false;
-  scene.add(cockpit);
-}
-function drawGauges(car) {
-  const g = gaugeCtx, W = 640, H = 300;
-  g.fillStyle = '#101216'; g.fillRect(0, 0, W, H);
-  const spdMph = Math.abs(carSpeeds(car).vf) * 2.23694;
-  const gauges = [
-    { x: 110, y: 150, r: 92, label: 'MPH', val: spdMph, max: 160, needle: spdMph / 160 },
-    { x: 320, y: 150, r: 92, label: 'RPM', val: car.rpm, max: 7600, needle: car.rpm / 7600 },
-    { x: 530, y: 150, r: 92, label: 'TEMP', val: car.engineTemp, max: 160, needle: car.engineTemp / 160, redFrom: 0.68 },
-  ];
-  for (const gt of gauges) {
-    g.beginPath(); g.arc(gt.x, gt.y, gt.r, 0, Math.PI * 2);
-    g.fillStyle = '#1b1e24'; g.fill();
-    g.lineWidth = 5; g.strokeStyle = '#3a3f47'; g.stroke();
-    const a0 = Math.PI * 0.75, a1 = Math.PI * 2.25;
-    if (gt.redFrom !== undefined) {
-      g.beginPath(); g.arc(gt.x, gt.y, gt.r - 8, a0 + (a1 - a0) * gt.redFrom, a1);
-      g.lineWidth = 9; g.strokeStyle = '#c33'; g.stroke();
-    }
-    const a = a0 + (a1 - a0) * clamp(gt.needle, 0, 1);
-    g.beginPath(); g.moveTo(gt.x, gt.y);
-    g.lineTo(gt.x + Math.cos(a) * (gt.r - 16), gt.y + Math.sin(a) * (gt.r - 16));
-    g.lineWidth = 6; g.strokeStyle = '#ffd94d'; g.stroke();
-    g.fillStyle = '#eef2f6'; g.font = 'bold 30px system-ui'; g.textAlign = 'center';
-    g.fillText(gt.label === 'RPM' ? String(Math.round(gt.val)) : String(Math.round(gt.val)), gt.x, gt.y + 52);
-    g.font = 'bold 19px system-ui'; g.fillStyle = '#9fb2c3';
-    g.fillText(gt.label, gt.x, gt.y + 78);
-  }
-  // warning lamps
-  const lamps = [];
-  if (car.engineTemp > 108) lamps.push(['TEMP', '#ff5a4d']);
-  if (car.fuel < 0.18) lamps.push(['FUEL', '#ffb84d']);
-  if (car.part[PART.RADIATOR] < 35) lamps.push(['RAD', '#ff5a4d']);
-  g.font = 'bold 24px system-ui'; g.textAlign = 'left';
-  lamps.forEach((L, i) => { g.fillStyle = L[1]; g.fillText('⚠ ' + L[0], 18, 34 + i * 30); });
-  gaugeTex.needsUpdate = true;
-}
-
-// ================================================================
-// GAME STATE, INPUT, CAMERAS, HUD
-// ================================================================
-const $ = id => document.getElementById(id);
-const car = newCar(0);
-const playerMesh = buildCarMesh(0xc23b2e, true);
-scene.add(playerMesh.group);
-for (const w of playerMesh.wheels) w.rotation.order = 'YXZ';
-const remoteMesh = buildCarMesh(0x2e6fc2, false);
-remoteMesh.group.visible = false;
-scene.add(remoteMesh.group);
-
-let state = 'TITLE';           // TITLE | DRIVE | PAUSE | DEAD
-let camMode = 0;               // 0 chase, 1 cockpit, 2 freecam
-let best = parseFloat(localStorage.getItem('edweb_best') || '0');
-let wheelSpin = 0, shake = 0, toastTimer = 0, gaugeTimer = 0;
-let warnedTemp = false, warnedFuel = false;
-const chasePos = new THREE.Vector3(0, 3.4, -9.5);
-const freeCam = { x: 0, y: 3, z: -10, yaw: 0, pitch: -0.12 };
-const keys = new Set();
-let revHold = 0;
-
-addEventListener('keydown', e => {
-  if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
-  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
-  keys.add(e.code);
-  if (e.repeat) return;
-  if (state === 'TITLE' && e.code === 'Enter') startDrive();
-  else if (state === 'DRIVE') {
-    if (e.code === 'KeyC') cycleCam();
-    if (e.code === 'KeyP' || e.code === 'Escape') { state = 'PAUSE'; $('pauseScr').classList.remove('hidden'); }
-    if (e.code === 'KeyR') resetOnRoad(false);
-    if (e.code === 'KeyF') tryRepair();
-  } else if (state === 'PAUSE' && (e.code === 'KeyP' || e.code === 'Escape')) {
-    state = 'DRIVE'; $('pauseScr').classList.add('hidden');
-  } else if (state === 'DEAD' && e.code === 'KeyR') {
-    resetOnRoad(true);
-  }
-});
-addEventListener('keyup', e => keys.delete(e.code));
-addEventListener('resize', () => {
-  camera.aspect = innerWidth / innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth, innerHeight);
-});
-const key = (...codes) => codes.some(c => keys.has(c));
-
-function startDrive() {
-  $('titleScr').classList.add('hidden');
-  $('hud').classList.remove('hidden');
-  if (MP.connected && car.distance < 5) car.x = MP.isHost ? -2.6 : 2.6;
-  state = 'DRIVE';
-  snapChase();
-  initAudio();
-}
-function resetOnRoad(tow) {
-  if (tow) repairCar(car);
-  car.x = MP.connected ? (MP.isHost ? -2.6 : 2.6) : 0;
-  car.heading = 0; car.vx = 0; car.vz = 0; car.vy = 0; car.y = 0.02;
-  car.airborne = false; car.yawRate = 0; car.steer = 0; car.gear = 1; car.rpm = 900;
-  warnedTemp = warnedFuel = false;
-  $('deadScr').classList.add('hidden');
-  state = 'DRIVE';
-  snapChase();
-  showToast(tow ? 'Tow truck dropped you off — good as new' : 'Back on the road', 2200);
-}
-function tryRepair() {
-  const { vf } = carSpeeds(car);
-  if (Math.abs(vf) < 0.3 && !car.dead) { repairCar(car); showToast('Repaired', 1500); }
-  else if (!car.dead) showToast('Stop fully to repair', 1500);
-}
-function cycleCam() {
-  camMode = (camMode + 1) % 3;
-  if (camMode === 2) { // enter freecam from current camera
-    freeCam.x = camera.position.x; freeCam.y = camera.position.y; freeCam.z = camera.position.z;
-    freeCam.yaw = car.heading; freeCam.pitch = -0.12;
-  }
-  if (camMode === 0) snapChase();
-  $('freeBox').classList.toggle('hidden', camMode !== 2);
-  cockpit.visible = camMode === 1;
-  playerMesh.group.visible = camMode !== 1;
-}
-function snapChase() {
-  const fx = Math.sin(car.heading), fz = Math.cos(car.heading);
-  chasePos.set(car.x - fx * 9.5, car.y + 3.4, car.z - fz * 9.5);
-}
-function showToast(text, ms) {
-  $('toast').textContent = text;
-  toastTimer = ms / 1000;
-}
-
-// input assembly (mirrors the native game)
-function assembleInput(dt) {
-  const inp = { steer: 0, throttle: 0, brake: 0, handbrake: key('Space') ? 1 : 0 };
-  if (camMode === 2) return inp; // freecam: car is parked
-  inp.steer = (key('KeyA', 'ArrowLeft') ? 1 : 0) - (key('KeyD', 'ArrowRight') ? 1 : 0);
-  const fwd = key('KeyW', 'ArrowUp'), back = key('KeyS', 'ArrowDown');
-  const { vf } = carSpeeds(car);
-  if (car.gear >= 1) {
-    inp.throttle = fwd ? 1 : 0;
-    if (back) {
-      if (vf <= 0.05) {
-        revHold += dt;
-        if (revHold > 0.25) { car.gear = 0; revHold = 0; }
-      } else inp.brake = 1;
-    } else revHold = 0;
+  // cabin / glasshouse
+  if (def.id === 'pickup'){
+    B.glass.prism(zS(1)+L*0.13, zS(2)+L*0.02, W*0.40, W*0.42, sec[1].yMid+0.02, sec[2].yMid+0.02, cabTop-0.05, cabTop-0.05);
+    B.paint.prism(zS(1)+L*0.15, zS(2)+0.0, W*0.43, W*0.44, cabTop-0.06, cabTop-0.06, cabTop+0.04, cabTop+0.04); // roof
+    // open bed: floor, walls, tailgate
+    B.dark.box(0, 0.68, (zS(2)+(-L*0.53))/2, W*0.86, 0.07, (-L*0.53)-zS(2)-0.1);
+    for (const sx of [-1,1]) B.paint.box(sx*(W*0.44), 0.86, (zS(2)-0.1+(-L*0.52))/2, 0.07, 0.42, (-L*0.52)-(zS(2)-0.1));
+    B.paint.box(0, 0.86, -L*0.515, W*0.90, 0.42, 0.07); // tailgate
+    B.paint.box(0, 0.86, zS(2)-0.05, W*0.90, 0.42, 0.07); // bed front wall
   } else {
-    inp.throttle = back ? 1 : 0;
-    if (fwd && vf >= -0.05) car.gear = 1;
+    const glassBack = def.id==='suv' ? -L*0.44 : -L*0.30;
+    B.glass.prism(zS(1)+L*0.10, glassBack, W*0.40, W*0.42, sec[1].yMid+0.02, sec[2].yMid+0.02, cabTop-0.05, (def.id==='suv'?cabTop:rearTop+0.18));
+    B.paint.prism(zS(1)+L*0.13, (def.id==='suv'?-L*0.46:-L*0.28), W*0.42, W*0.43, cabTop-0.06, cabTop-0.06, cabTop+0.04, cabTop+0.04); // roof
+    if (def.id !== 'suv') // trunk deck
+      B.paint.prism(-L*0.26, -L*0.53, W*0.45, W*0.44, sec[3].yMid-0.02, sec[3].yMid-0.02, rearTop+0.10, rearTop);
   }
+  if (def.id === 'suv'){ // roof rails
+    for (const sx of [-1,1]) B.dark.box(sx*W*0.30, cabTop+0.09, -L*0.10, 0.07, 0.05, L*0.62);
+  }
+  if (def.id === 'coupe'){ // spoiler on struts
+    B.paint.box(0, rearTop+0.24, -L*0.50, W*0.78, 0.05, 0.30);
+    for (const sx of [-1,1]) B.dark.box(sx*W*0.26, rearTop+0.10, -L*0.50, 0.06, 0.16, 0.08);
+  }
+  if (def.id === 'muscle'){ // hood scoop
+    B.paint.box(0, hoodTop+0.05, L*0.40, 0.5, 0.09, 0.42);
+    B.dark.box(0, hoodTop+0.10, L*0.44, 0.34, 0.03, 0.20); // scoop opening
+  }
+  // bumpers, grille, lights
+  B.accent.prism(L*0.60, L*0.50, W*0.48, W*0.47, 0.30, 0.32, 0.56, 0.58);
+  B.accent.prism(-L*0.50, -L*0.60, W*0.47, W*0.48, 0.32, 0.30, 0.58, 0.56);
+  B.dark.box(0, 0.66, L*0.575, W*0.46, 0.20, 0.06); // grille
+  for (const sx of [-1,1]){
+    B.lightF.box(sx*W*0.33, 0.72, L*0.565, W*0.20, 0.13, 0.05);
+    B.lightR.box(sx*W*0.33, 0.74, -L*0.565, W*0.20, 0.11, 0.05);
+    B.dark.box(sx*(W*0.50+0.03), cabTop-0.28, zS(1)+0.05, 0.16, 0.10, 0.07); // mirror head
+    B.dark.box(sx*(W*0.485), cabTop-0.30, zS(1)+0.05, 0.05, 0.05, 0.05);     // mirror stalk
+    B.dark.box(sx*(W*0.30), 0.16, -L*0.46, 0.09, 0.07, 0.16);               // exhaust tip
+  }
+  if (def.id==='coupe' || def.id==='muscle') for (const sx of [-1,1])
+    B.dark.box(sx*(W*0.16), 0.16, -L*0.46, 0.09, 0.07, 0.16); // dual exhausts
+  // side skirts
+  for (const sx of [-1,1]) B.dark.box(sx*W*0.475, 0.30, 0, 0.04, 0.14, L*0.52);
+  return B;
+}
+
+/* ---------- skinned car mesh ---------- */
+let carGroup = null, skinParts = [], wheelMeshes = [], blobShadow = null;
+const MATS = {};
+function makeMats(def){
+  MATS.paint = new THREE.MeshPhongMaterial({ color:def.color, shininess:70, specular:0x555555 });
+  MATS.accent = new THREE.MeshPhongMaterial({ color:def.accent, shininess:40 });
+  MATS.glass = new THREE.MeshPhongMaterial({ color:0x10161f, shininess:120, specular:0x99bbdd, transparent:true, opacity:0.88 });
+  MATS.lightF = new THREE.MeshBasicMaterial({ color:0xfff6c9 });
+  MATS.lightR = new THREE.MeshBasicMaterial({ color:0xff2a22 });
+  MATS.dark = new THREE.MeshPhongMaterial({ color:0x17181a, shininess:25 });
+}
+function buildCarMeshes(){
+  if (carGroup){ scene.remove(carGroup); carGroup.traverse(o=>{ if(o.geometry) o.geometry.dispose(); }); }
+  wheelMeshes.forEach(g=>scene.remove(g));
+  skinParts = []; wheelMeshes = [];
+  carGroup = new THREE.Group(); scene.add(carGroup);
+  makeMats(carDef);
+  const buckets = buildBuckets(carDef);
+  const nodes = car.nodes;
+  for (const key of Object.keys(buckets)){
+    const bk = buckets[key], n = bk.pos.length/3;
+    if (!n) continue;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(bk.pos), 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(bk.nor), 3));
+    // anchors: 3 nearest nodes per vertex, offset in car-local coords
+    const anchors = [];
+    for (let v=0; v<n; v++){
+      const vx = bk.pos[v*3], vy = bk.pos[v*3+1], vz = bk.pos[v*3+2];
+      const ds = nodes.map((nd,i)=>{ const dx=vx-nd.rest.x, dy=vy-nd.rest.y, dz=vz-nd.rest.z;
+        return [dx*dx+dy*dy+dz*dz, i]; }).sort((a,b)=>a[0]-b[0]).slice(0,3);
+      const ws = ds.map(d=>1/(Math.sqrt(d[0])+0.05)); const sum = ws[0]+ws[1]+ws[2];
+      anchors.push(ds.map((d,k)=>({ i:d[1], w:ws[k]/sum,
+        ox:vx-nodes[d[1]].rest.x, oy:vy-nodes[d[1]].rest.y, oz:vz-nodes[d[1]].rest.z })));
+    }
+    const mesh = new THREE.Mesh(geo, MATS[key]);
+    carGroup.add(mesh);
+    skinParts.push({ geo:geo, anchors:anchors, n:n });
+  }
+  // wheels: unit wheel scaled per car (tire + rim + 5 spokes + hub)
+  const tireG = new THREE.CylinderGeometry(1, 1, 0.72, 20); tireG.rotateZ(Math.PI/2);
+  const rimG = new THREE.CylinderGeometry(0.58, 0.58, 0.74, 14); rimG.rotateZ(Math.PI/2);
+  const hubG = new THREE.CylinderGeometry(0.16, 0.16, 0.78, 10); hubG.rotateZ(Math.PI/2);
+  const tireM = new THREE.MeshPhongMaterial({ color:0x131416, shininess:8 });
+  const rimM = new THREE.MeshPhongMaterial({ color:0xb9bec6, shininess:90, specular:0x888888 });
+  for (let w=0; w<4; w++){
+    const g = new THREE.Group();
+    g.add(new THREE.Mesh(tireG, tireM));
+    g.add(new THREE.Mesh(rimG, rimM));
+    for (let sIdx=0; sIdx<5; sIdx++){
+      const sp = new THREE.Mesh(new THREE.BoxGeometry(0.76, 0.17, 0.30), rimM);
+      sp.rotation.x = sIdx*Math.PI/5; g.add(sp);
+    }
+    g.add(new THREE.Mesh(hubG, MATS.dark));
+    g.scale.setScalar(carDef.wheelR);
+    g.userData.spin = 0;
+    scene.add(g); wheelMeshes.push(g);
+  }
+  // blob shadow (cheap, always under the car — no shadow-map cost)
+  if (!blobShadow){
+    const cv = document.createElement('canvas'); cv.width = cv.height = 128;
+    const cx2 = cv.getContext('2d');
+    const gr = cx2.createRadialGradient(64,64,8,64,64,62);
+    gr.addColorStop(0,'rgba(0,0,0,0.55)'); gr.addColorStop(1,'rgba(0,0,0,0)');
+    cx2.fillStyle = gr; cx2.fillRect(0,0,128,128);
+    blobShadow = new THREE.Mesh(new THREE.PlaneGeometry(1,1),
+      new THREE.MeshBasicMaterial({ map:new THREE.CanvasTexture(cv), transparent:true, depthWrite:false }));
+    blobShadow.rotation.x = -Math.PI/2; scene.add(blobShadow);
+  }
+  blobShadow.scale.set(carDef.width*1.7, carDef.length*1.25, 1);
+  buildDebug();
+}
+function updateSkin(){
+  const fr = car.frame();
+  for (const part of skinParts){
+    const p = part.geo.attributes.position.array;
+    for (let v=0; v<part.n; v++){
+      let x=0, y=0, z=0;
+      for (const a of part.anchors[v]){
+        const nd = car.nodes[a.i];
+        x += a.w * (nd.pos.x + fr.right.x*a.ox + fr.up.x*a.oy + fr.fwd.x*a.oz);
+        y += a.w * (nd.pos.y + fr.right.y*a.ox + fr.up.y*a.oy + fr.fwd.y*a.oz);
+        z += a.w * (nd.pos.z + fr.right.z*a.ox + fr.up.z*a.oy + fr.fwd.z*a.oz);
+      }
+      p[v*3] = x; p[v*3+1] = y; p[v*3+2] = z;
+    }
+    part.geo.attributes.position.needsUpdate = true;
+    part.geo.computeVertexNormals();
+  }
+  // wheels follow their nodes (even detached ones), with steer + spin
+  const M = new THREE.Matrix4(), Rx = new THREE.Matrix4();
+  for (let w=0; w<4; w++){
+    const g = wheelMeshes[w], nd = car.nodes[car.wheelIdx[w]];
+    const sa = w<2 ? car.steerAngle : 0;
+    const fx = fr.fwd.x*Math.cos(sa) - fr.right.x*Math.sin(sa);
+    const fy = fr.fwd.y*Math.cos(sa) - fr.right.y*Math.sin(sa);
+    const fz = fr.fwd.z*Math.cos(sa) - fr.right.z*Math.sin(sa);
+    let rx = fr.up.y*fz - fr.up.z*fy, ry = fr.up.z*fx - fr.up.x*fz, rz = fr.up.x*fy - fr.up.y*fx;
+    const rl = Math.hypot(rx,ry,rz)||1; rx/=rl; ry/=rl; rz/=rl;
+    const ux = fy*rz - fz*ry, uy = fz*rx - fx*rz, uz = fx*ry - fy*rx;
+    const vF = nd.vel.x*fx + nd.vel.y*fy + nd.vel.z*fz;
+    g.userData.spin -= vF/carDef.wheelR * lastDt;
+    M.makeBasis(new THREE.Vector3(rx,ry,rz), new THREE.Vector3(ux,uy,uz), new THREE.Vector3(fx,fy,fz));
+    Rx.makeRotationX(g.userData.spin);
+    M.multiply(Rx);
+    g.quaternion.setFromRotationMatrix(M);
+    g.position.set(nd.pos.x, nd.pos.y, nd.pos.z);
+  }
+  // blob shadow under the car
+  const c = car.center();
+  const gh = world.groundHeight(c.x, c.z, car.sHint);
+  blobShadow.position.set(c.x, gh.h + 0.04, c.z);
+  const hAbove = Math.max(0, c.y - gh.h - 0.5);
+  blobShadow.material.opacity = Math.max(0.12, 0.9 - hAbove*0.10);
+}
+
+/* ---------- debug node/beam overlay (B) ---------- */
+let dbgGroup = null, dbgPts = null, dbgLines = null, debugOn = false;
+function buildDebug(){
+  if (dbgGroup){ scene.remove(dbgGroup); dbgGroup = null; }
+  if (!car) return;
+  dbgGroup = new THREE.Group(); dbgGroup.visible = debugOn; scene.add(dbgGroup);
+  const pg = new THREE.BufferGeometry();
+  pg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(car.nodes.length*3), 3));
+  dbgPts = new THREE.Points(pg, new THREE.PointsMaterial({ color:0xffffff, size:0.13 }));
+  dbgGroup.add(dbgPts);
+  const lg = new THREE.BufferGeometry();
+  lg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(car.beams.length*6), 3));
+  lg.setAttribute('color', new THREE.BufferAttribute(new Float32Array(car.beams.length*6), 3));
+  dbgLines = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ vertexColors:true }));
+  dbgGroup.add(dbgLines);
+}
+function updateDebug(){
+  if (!dbgGroup || !debugOn) return;
+  const pp = dbgPts.geometry.attributes.position.array;
+  car.nodes.forEach((nd,i)=>{ pp[i*3]=nd.pos.x; pp[i*3+1]=nd.pos.y; pp[i*3+2]=nd.pos.z; });
+  dbgPts.geometry.attributes.position.needsUpdate = true;
+  const lp = dbgLines.geometry.attributes.position.array, lc = dbgLines.geometry.attributes.color.array;
+  car.beams.forEach((b,i)=>{
+    const A = car.nodes[b.a].pos, B = car.nodes[b.b].pos;
+    let ex = B.x, ey = B.y, ez = B.z, r, g, bl;
+    if (b.broken){ r=0.85; g=0.12; bl=0.10; ex = A.x+(B.x-A.x)*0.35; ey = A.y+(B.y-A.y)*0.35; ez = A.z+(B.z-A.z)*0.35; }
+    else if (b.deformed){ r=1.0; g=0.55; bl=0.08; }
+    else { r=0.45; g=0.85; bl=0.5; }
+    lp.set([A.x,A.y,A.z, ex,ey,ez], i*6);
+    lc.set([r,g,bl, r,g,bl], i*6);
+  });
+  dbgLines.geometry.attributes.position.needsUpdate = true;
+  dbgLines.geometry.attributes.color.needsUpdate = true;
+}
+</script>
+<script>
+/* ============================ WORLD RENDERING ============================ */
+const CHUNK = 60;
+const LATS = [-60,-38,-24,-16,-12,-9.5,-8,-7,-6,-5,-4.6,-3,-1.5,0,1.5,3,4.6,5,6,7,8,9.5,12,16,24,38,60];
+const terrainMat = new THREE.MeshLambertMaterial({ vertexColors:true });
+const markMat = new THREE.MeshBasicMaterial({ color:0xf2f2f2 });
+const trunkMat = new THREE.MeshLambertMaterial({ color:0x6b4a2c });
+const leafMats = [0x3e7d32, 0x4c8a3a, 0x356b2a].map(c=>new THREE.MeshLambertMaterial({ color:c }));
+const rockMat = new THREE.MeshLambertMaterial({ color:0x77716a });
+const postMat = new THREE.MeshLambertMaterial({ color:0xf0f0f0 });
+const postTopMat = new THREE.MeshLambertMaterial({ color:0xd23b2e });
+const trunkGeo = new THREE.CylinderGeometry(0.14, 0.22, 1.8, 6);
+const canopyGeo = new THREE.IcosahedronGeometry(1.6, 0);
+const rockGeo = new THREE.IcosahedronGeometry(1, 0);
+const postGeo = new THREE.BoxGeometry(0.14, 1.0, 0.14);
+const postTopGeo = new THREE.BoxGeometry(0.16, 0.22, 0.16);
+function hash2(a, b){ let h = Math.sin(a*127.1 + b*311.7)*43758.5453; return h - Math.floor(h); }
+
+function buildChunk(idx){
+  const g = new THREE.Group();
+  const s0 = idx*CHUNK, rows = Math.floor(CHUNK/3)+1, cols = LATS.length;
+  const pos = [], col = [], index = [];
+  for (let r=0; r<rows; r++){
+    const s = s0 + r*3;
+    const p = world.trackPoint(s);
+    const rx = Math.cos(p.heading), rz = -Math.sin(p.heading);
+    for (let c=0; c<cols; c++){
+      const lat = LATS[c];
+      const info = world.heightAtSL(s, lat);
+      pos.push(p.x + rx*lat, info.h, p.z + rz*lat);
+      const slope = Math.abs(world.heightAtSL(s+1.5, lat).h - world.heightAtSL(s-1.5, lat).h)/3
+                  + Math.abs(world.heightAtSL(s, lat+1.5).h - world.heightAtSL(s, lat-1.5).h)/3;
+      let cr, cg, cb;
+      if (Math.abs(lat) <= 4.6){ const v = 0.20 + hash2(s, lat)*0.03; cr=v; cg=v+0.015; cb=v+0.03; }        // asphalt
+      else if (slope > 0.85){ cr=0.44; cg=0.41; cb=0.37; }                                                  // rock (cliff walls)
+      else if (info.h < p.y - 8){ const v = 0.55 + hash2(s, lat)*0.08; cr=v; cg=v*0.88; cb=v*0.62; }        // cliff floor sand
+      else { const v = hash2(Math.floor(s/3), Math.floor(lat)); cr=0.16+v*0.05; cg=0.36+v*0.10; cb=0.14+v*0.04; } // grass
+      col.push(cr, cg, cb);
+    }
+  }
+  for (let r=0; r<rows-1; r++) for (let c=0; c<cols-1; c++){
+    const a = r*cols+c, b = a+1, d = a+cols, e = d+1;
+    index.push(a, d, b, b, d, e);
+  }
+  const tg = new THREE.BufferGeometry();
+  tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+  tg.setAttribute('color', new THREE.BufferAttribute(new Float32Array(col), 3));
+  tg.setIndex(index); tg.computeVertexNormals();
+  g.add(new THREE.Mesh(tg, terrainMat));
+  // road markings: edge lines + center dashes
+  const mp = [];
+  const quadW = (cx, cy, cz, rx, rz, hw, hl)=>{
+    // axis-aligned-in-track-space quad: right vector (rx,rz), fwd = (-rz, rx)
+    const fx = -rz, fz = rx;
+    mp.push(cx-rx*hw-fx*hl, cy, cz-rz*hw-fz*hl,  cx+rx*hw-fx*hl, cy, cz+rz*hw-fz*hl,  cx+rx*hw+fx*hl, cy, cz+rz*hw+fz*hl);
+    mp.push(cx-rx*hw-fx*hl, cy, cz-rz*hw-fz*hl,  cx+rx*hw+fx*hl, cy, cz+rz*hw+fz*hl,  cx-rx*hw+fx*hl, cy, cz-rz*hw+fz*hl);
+  };
+  for (let s = s0; s < s0+CHUNK; s += 3){
+    const p = world.trackPoint(s+1.5);
+    const rx = Math.cos(p.heading), rz = -Math.sin(p.heading);
+    for (const side of [-1,1]){
+      const lat = side*4.25;
+      quadW(p.x+rx*lat, p.y+0.03, p.z+rz*lat, rx, rz, 0.09, 1.5);
+    }
+    if ((s/3) % 2 === 0) quadW(p.x, p.y+0.03, p.z, rx, rz, 0.13, 1.4); // dash
+  }
+  const mg = new THREE.BufferGeometry();
+  mg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(mp), 3));
+  mg.computeVertexNormals();
+  g.add(new THREE.Mesh(mg, markMat));
+  // obstacles in this chunk's segments
+  const segA = Math.floor(s0/50), segB = Math.floor((s0+CHUNK)/50);
+  for (let seg = segA; seg <= segB; seg++){
+    for (const o of world.obstaclesForSegment(seg)){
+      if (o.s < s0 || o.s >= s0+CHUNK) continue;
+      const base = world.heightAtSL(o.s, o.lat).h;
+      if (o.type === 'tree'){
+        const t = new THREE.Group();
+        const trunk = new THREE.Mesh(trunkGeo, trunkMat); trunk.position.y = 0.9; t.add(trunk);
+        const c1 = new THREE.Mesh(canopyGeo, leafMats[Math.floor(hash2(o.s, o.lat)*3)]);
+        c1.position.y = 2.9; c1.scale.setScalar(0.9 + hash2(o.s, 1)*0.5); t.add(c1);
+        const c2 = new THREE.Mesh(canopyGeo, leafMats[Math.floor(hash2(o.lat, o.s)*3)]);
+        c2.position.set(0.5, 3.7, 0.3); c2.scale.setScalar(0.6 + hash2(o.s, 2)*0.4); t.add(c2);
+        t.position.set(o.x, base - 0.1, o.z); t.rotation.y = hash2(o.s, o.lat)*3;
+        g.add(t);
+      } else if (o.type === 'rock'){
+        const r = new THREE.Mesh(rockGeo, rockMat);
+        r.position.set(o.x, base + o.r*0.3, o.z);
+        r.scale.set(o.r, o.r*0.75, o.r);
+        r.rotation.set(hash2(o.s,1)*3, hash2(o.s,2)*3, hash2(o.s,3)*3);
+        g.add(r);
+      } else if (o.type === 'post'){
+        const p1 = new THREE.Mesh(postGeo, postMat); p1.position.set(o.x, base + 0.5, o.z); g.add(p1);
+        const p2 = new THREE.Mesh(postTopGeo, postTopMat); p2.position.set(o.x, base + 0.95, o.z); g.add(p2);
+      }
+    }
+  }
+  g.userData.terrainGeo = tg; g.userData.markGeo = mg;
+  return g;
+}
+const chunks = new Map();
+function updateChunks(){
+  if (!car) return;
+  const cur = Math.floor(car.sHint/CHUNK);
+  const need = new Set();
+  for (let i = cur-1; i <= cur+3; i++) need.add(i);
+  for (const idx of need) if (!chunks.has(idx)){ const g = buildChunk(idx); chunks.set(idx, g); scene.add(g); }
+  for (const [idx, g] of chunks){
+    if (!need.has(idx)){
+      scene.remove(g);
+      g.userData.terrainGeo.dispose(); g.userData.markGeo.dispose();
+      chunks.delete(idx);
+    }
+  }
+}
+
+/* ============================ INPUT / GAME FLOW ============================ */
+const keys = {};
+let started = false, paused = false, camMode = 0; // 0 chase, 1 cockpit, 2 freecam
+let pendingDef = S.CAR_DEFS[0];
+const $ = id => document.getElementById(id);
+let toastTimer = 0;
+function toast(msg, ms){
+  $('toast').textContent = msg;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=>{ $('toast').textContent=''; }, ms||2200);
+}
+function setCar(defId, sPos){
+  carDef = S.CAR_DEFS.find(d=>d.id===defId) || S.CAR_DEFS[0];
+  car = S.spawnCar(carDef.id, world, (sPos===undefined ? 100 : sPos));
+  buildCarMeshes();
+  document.querySelectorAll('#carBtns button').forEach(b=>b.classList.toggle('active', b.dataset.id===carDef.id));
+  $('carName').textContent = carDef.name;
+  chasePos = null;
+}
+function readInput(){
+  const inp = { throttle:0, reverse:0, brake:0, steer:0, handbrake:0 };
+  if (camMode === 2){ inp.handbrake = 1; return inp; } // parked while freecamming
+  let st = 0;
+  if (keys['KeyA'] || keys['ArrowLeft']) st += 1;
+  if (keys['KeyD'] || keys['ArrowRight']) st -= 1;
+  inp.steer = st;
+  if (keys['KeyW'] || keys['ArrowUp']) inp.throttle = 1;
+  if (keys['KeyS'] || keys['ArrowDown']){
+    if (car.forwardSpeed() > 0.6) inp.brake = 1; else inp.reverse = 1;
+  }
+  if (keys['Space']) inp.handbrake = 1;
   return inp;
 }
-
-// ---------- HUD ----------
-const condRows = [];
-{
-  const wrap = $('condRows');
-  PART_NAMES.forEach((nm, i) => {
-    const row = document.createElement('div');
-    row.className = 'condRow';
-    row.innerHTML = `<span class="nm">${nm}</span><div class="barOuter"><div class="barInner"></div></div>`;
-    wrap.appendChild(row);
-    condRows.push(row.querySelector('.barInner'));
-  });
-}
-function healthColor(v) { return v > 55 ? '#57d957' : (v > 25 ? '#ffb84d' : '#ff5a4d'); }
-function updateHUD() {
-  const { vf, onRoad } = carSpeeds(car);
-  const mph = Math.abs(vf) * 2.23694;
-  $('speedVal').textContent = String(Math.round(mph));
-  $('gearVal').textContent = car.gear === 0 ? 'R' : String(car.gear);
-  const rb = $('rpmBar');
-  rb.style.width = (car.rpm / 7600 * 100).toFixed(1) + '%';
-  rb.style.background = car.rpm > 6200 ? '#ff5a4d' : '#57d957';
-  $('distVal').textContent = (car.distance * 0.000621371).toFixed(2) + ' mi';
-  $('bestVal').textContent = 'best ' + (best * 0.000621371).toFixed(2) + ' mi';
-  for (let i = 0; i < 10; i++) {
-    condRows[i].style.width = car.part[i].toFixed(0) + '%';
-    condRows[i].style.background = healthColor(car.part[i]);
+window.addEventListener('keydown', e=>{
+  if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
+  keys[e.code] = true;
+  if (!started){ if (e.code === 'Enter') startGame(); return; }
+  if (e.code === 'KeyP' || e.code === 'Escape'){ togglePause(); return; }
+  if (paused) return;
+  if (e.code === 'KeyC'){ camMode = (camMode+1)%3; $('freeBox').classList.toggle('hidden', camMode!==2);
+    if (camMode===2) initFreecam(); toast(['Chase camera','Cockpit camera','Freecam'][camMode], 1200); }
+  if (e.code === 'KeyB'){ debugOn = !debugOn; if (dbgGroup) dbgGroup.visible = debugOn; toast(debugOn?'Beam view ON':'Beam view OFF', 1200); }
+  if (e.code === 'KeyR'){ setCar(carDef.id, Math.max(100, Math.floor(car.sHint))); toast('Fresh ' + carDef.name, 1400); }
+  if (e.code === 'KeyF'){
+    if (Math.abs(car.forwardSpeed()) < 0.6 && car.maxNodeSpeed() < 0.9){ car.repair(); toast('Repaired', 1400); }
+    else toast('Stop fully to repair', 1600);
   }
-  const tb = $('tempBar');
-  tb.style.width = clamp(car.engineTemp / 160 * 100, 0, 100).toFixed(1) + '%';
-  tb.style.background = car.engineTemp > 125 ? '#ff5a4d' : (car.engineTemp > 108 ? '#ffb84d' : '#57d957');
-  $('tempVal').textContent = Math.round(car.engineTemp) + 'C';
-  const fb = $('fuelBar');
-  fb.style.width = (car.fuel * 100).toFixed(0) + '%';
-  fb.style.background = car.fuel < 0.18 ? '#ff5a4d' : '#57d957';
-  $('fuelVal').textContent = Math.round(car.fuel * 100) + '%';
-  $('offroad').classList.toggle('hidden', onRoad || state !== 'DRIVE');
-}
-
-// ---------- engine audio (tiny, guarded) ----------
-let AC = null, engOsc = null, engGain = null;
-function initAudio() {
-  if (AC) { AC.resume && AC.resume(); return; }
-  try {
-    AC = new (window.AudioContext || window.webkitAudioContext)();
-    engOsc = AC.createOscillator(); engOsc.type = 'sawtooth';
-    const filt = AC.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 420;
-    engGain = AC.createGain(); engGain.gain.value = 0;
-    engOsc.connect(filt); filt.connect(engGain); engGain.connect(AC.destination);
-    engOsc.start();
-  } catch (e) { AC = null; }
-}
-function thud(strength) {
-  if (!AC) return;
-  try {
-    const dur = 0.16, buf = AC.createBuffer(1, AC.sampleRate * dur, AC.sampleRate);
-    const d = buf.getChannelData(0);
-    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
-    const src = AC.createBufferSource(); src.buffer = buf;
-    const g = AC.createGain(); g.gain.value = clamp(strength, 0.05, 0.5);
-    src.connect(g); g.connect(AC.destination); src.start();
-  } catch (e) {}
-}
-
-// ================================================================
-// MULTIPLAYER — WebRTC + ICE, manual code pairing, no server
-// ================================================================
-const MP = {
-  pc: null, dc: null, isHost: false, connected: false,
-  remote: { active: false, x: 0, y: 0, z: 0, h: 0, last: 0, dmg: 0 },
-  sendAcc: 0,
-};
-const mpSay = t => { $('mpState').textContent = t; $('mpStatus').textContent = t ? ('Multiplayer: ' + t) : ''; };
-const encDesc = o => btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(o))));
-const decDesc = s => JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(s.trim()), ch => ch.charCodeAt(0))));
-function waitIce(pc) {
-  if (pc.iceGatheringState === 'complete') return Promise.resolve();
-  return new Promise(res => {
-    const to = setTimeout(res, 5000);
-    pc.addEventListener('icegatheringstatechange', () => {
-      if (pc.iceGatheringState === 'complete') { clearTimeout(to); res(); }
-    });
-  });
-}
-function makePC() {
-  const pc = new RTCPeerConnection({ iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-  ] });
-  pc.oniceconnectionstatechange = () => {
-    if (pc.iceConnectionState === 'failed') mpSay('connection failed — a strict router may be blocking peer-to-peer (no relay in this version). Try again or a different network.');
-    else if (pc.iceConnectionState === 'disconnected') { MP.connected = false; mpSay('disconnected'); }
-  };
-  return pc;
-}
-function setupDC(dc) {
-  MP.dc = dc;
-  dc.onopen = () => { MP.connected = true; mpSay('connected! Press Enter and drive — you start side by side.'); };
-  dc.onclose = () => { MP.connected = false; mpSay('disconnected'); };
-  dc.onmessage = e => {
-    try {
-      const s = JSON.parse(e.data);
-      MP.remote.x = s.x; MP.remote.y = s.y; MP.remote.z = s.z; MP.remote.h = s.h;
-      MP.remote.dmg = s.dmg || 0; MP.remote.active = true; MP.remote.last = performance.now();
-    } catch (err) {}
-  };
-}
-$('mpHostBtn').onclick = async () => {
-  try {
-    MP.isHost = true;
-    MP.pc = makePC();
-    setupDC(MP.pc.createDataChannel('ed'));
-    await MP.pc.setLocalDescription(await MP.pc.createOffer());
-    mpSay('gathering network routes (ICE)…');
-    await waitIce(MP.pc);
-    $('mpHostUI').classList.remove('hidden');
-    $('mpJoinUI').classList.add('hidden');
-    $('mpOfferOut').value = encDesc(MP.pc.localDescription);
-    mpSay('invite code ready — send it to the other player, then paste their reply below.');
-  } catch (e) { mpSay('could not create invite: ' + e.message); }
-};
-$('mpConnectBtn').onclick = async () => {
-  try {
-    await MP.pc.setRemoteDescription(decDesc($('mpAnswerIn').value));
-    mpSay('connecting…');
-  } catch (e) { mpSay('that reply code did not work: ' + e.message); }
-};
-$('mpJoinBtn').onclick = () => {
-  MP.isHost = false;
-  $('mpJoinUI').classList.remove('hidden');
-  $('mpHostUI').classList.add('hidden');
-  mpSay('paste the invite code you were sent.');
-};
-$('mpReplyBtn').onclick = async () => {
-  try {
-    MP.pc = makePC();
-    MP.pc.ondatachannel = e => setupDC(e.channel);
-    await MP.pc.setRemoteDescription(decDesc($('mpOfferIn').value));
-    await MP.pc.setLocalDescription(await MP.pc.createAnswer());
-    mpSay('gathering network routes (ICE)…');
-    await waitIce(MP.pc);
-    $('mpAnswerOut').value = encDesc(MP.pc.localDescription);
-    mpSay('reply code ready — send it back to the host.');
-  } catch (e) { mpSay('that invite code did not work: ' + e.message); }
-};
-function mpTick(dt) {
-  // send our state ~15x/sec
-  if (MP.dc && MP.dc.readyState === 'open') {
-    MP.sendAcc += dt;
-    if (MP.sendAcc > 0.066) {
-      MP.sendAcc = 0;
-      try { MP.dc.send(JSON.stringify({ x: car.x, y: car.y, z: car.z, h: car.heading, dmg: Math.round(car.damage) })); } catch (e) {}
-    }
+  if (e.code.startsWith('Digit')){
+    const n = parseInt(e.code.slice(5), 10);
+    if (n >= 1 && n <= 5){ setCar(S.CAR_DEFS[n-1].id, Math.max(100, Math.floor(car.sHint))); toast(carDef.name, 1200); }
   }
-  // render the remote car, smoothly
-  const R = MP.remote;
-  const fresh = R.active && (performance.now() - R.last < 3000);
-  remoteMesh.group.visible = fresh;
-  if (fresh) {
-    const p = remoteMesh.group.position;
-    const k = 1 - Math.exp(-12 * dt);
-    p.x += (R.x - p.x) * k; p.y += (R.y - p.y) * k; p.z += (R.z - p.z) * k;
-    let dh = R.h - remoteMesh.group.rotation.y;
-    while (dh > Math.PI) dh -= Math.PI * 2;
-    while (dh < -Math.PI) dh += Math.PI * 2;
-    remoteMesh.group.rotation.y += dh * k;
-    remoteMesh.group.rotation.x = 0; remoteMesh.group.rotation.z = 0;
-    for (const w of remoteMesh.wheels) w.rotation.x += dt * 8;
-  }
-}
-function remoteCollider() {
-  const R = MP.remote;
-  if (!R.active || performance.now() - R.last >= 3000) return null;
-  return { x: R.x, z: R.z, r: 1.15, y: 0, h: 1.4, kind: 4, ramp: 0, moving: true, vx: 0, vz: 0 };
+});
+window.addEventListener('keyup', e=>{ keys[e.code] = false; });
+function togglePause(){
+  paused = !paused;
+  $('pauseScr').classList.toggle('hidden', !paused);
 }
 
-// ================================================================
-// MAIN LOOP
-// ================================================================
-const DEAD_TEXT = {
-  [DEAD.OVERHEAT]: 'The engine seized — it overheated and died. A smashed radiator will do that.',
-  [DEAD.FUEL]: 'Out of fuel. The tank ran dry — a ruptured tank leaks the whole way.',
-  [DEAD.CRASH]: 'That impact was too much. The car is totaled.',
-  [DEAD.FALL]: 'That landing was too much. The car is totaled.',
-};
-let lastT = performance.now() / 1000, physAcc = 0, titleT = 0;
-
-function processEvents(events) {
-  for (const ev of events) {
-    applyPartDamage(car, ev);
-    if (ev.kind === EV.LAUNCH) { showToast('Launched!', 1400); shake = Math.max(shake, 0.25); }
-    if (ev.kind === EV.IMPACT) {
-      shake = Math.max(shake, clamp(ev.closing * 0.02, 0.05, 0.5));
-      if (ev.closing > 5) thud(ev.closing * 0.03);
-      if (ev.closing > 9) showToast('Hard hit!', 1200);
-      // dent the body at the hit point, pushed in along the hit normal
-      const fx = Math.sin(car.heading), fz = Math.cos(car.heading);
-      const rxv = Math.cos(car.heading), rzv = -Math.sin(car.heading);
-      const nx = ev.nx || 0, nz = ev.nz || 0;
-      const dlx = -(nx * rxv + nz * rzv), dlz = -(nx * fx + nz * fz);
-      applyDeform(playerMesh, ev.lx, clamp(ev.lz, -2.0, 2.0), dlx, dlz, clamp(ev.closing * 0.028, 0.03, 0.42));
-    }
-    if (ev.kind === EV.LANDING && ev.closing > 6) { shake = Math.max(shake, 0.3); thud(0.25); }
-  }
+/* cameras */
+let chasePos = null;
+const free = { pos:new THREE.Vector3(0, 6, -10), yaw:0, pitch:-0.2 };
+function initFreecam(){
+  free.pos.copy(camera.position);
+  const fr = car.frame();
+  free.yaw = Math.atan2(fr.fwd.x, fr.fwd.z);
+  free.pitch = -0.15;
 }
-
-function frame() {
-  requestAnimationFrame(frame);
-  const now = performance.now() / 1000;
-  let dt = Math.min(now - lastT, 0.05);
-  lastT = now;
-  if (dt <= 0) dt = 0.001;
-
-  const focusZ = camMode === 2 && state === 'DRIVE' ? freeCam.z : car.z;
-  ensureChunks(state === 'TITLE' ? car.z : focusZ);
-  mountainGroup.position.z = Math.round(focusZ / 300) * 300;
-  sun.position.set(car.x + 40, 90, car.z - 30);
-  sun.target.position.set(car.x, 0, car.z + 40);
-
-  if (state === 'DRIVE') {
-    const inp = assembleInput(dt);
-    if (camMode === 2) {
-      // freecam flight; the car sits parked with the handbrake on
-      const sp = (key('ShiftLeft', 'ShiftRight') ? 60 : 24) * dt;
-      const fxv = Math.sin(freeCam.yaw) * Math.cos(freeCam.pitch), fyv = Math.sin(freeCam.pitch), fzv = Math.cos(freeCam.yaw) * Math.cos(freeCam.pitch);
-      const rxv = Math.cos(freeCam.yaw), rzv = -Math.sin(freeCam.yaw);
-      if (key('KeyW')) { freeCam.x += fxv * sp; freeCam.y += fyv * sp; freeCam.z += fzv * sp; }
-      if (key('KeyS')) { freeCam.x -= fxv * sp; freeCam.y -= fyv * sp; freeCam.z -= fzv * sp; }
-      if (key('KeyA')) { freeCam.x -= rxv * sp; freeCam.z -= rzv * sp; }
-      if (key('KeyD')) { freeCam.x += rxv * sp; freeCam.z += rzv * sp; }
-      if (key('KeyE', 'Space')) freeCam.y += sp;
-      if (key('KeyQ')) freeCam.y -= sp;
-      if (key('ArrowLeft')) freeCam.yaw += 1.9 * dt;
-      if (key('ArrowRight')) freeCam.yaw -= 1.9 * dt;
-      if (key('ArrowUp')) freeCam.pitch = clamp(freeCam.pitch + 1.4 * dt, -1.4, 1.4);
-      if (key('ArrowDown')) freeCam.pitch = clamp(freeCam.pitch - 1.4 * dt, -1.4, 1.4);
-      if (freeCam.y < 0.4) freeCam.y = 0.4;
-      inp.handbrake = 1;
-    }
-    const events = [];
-    physAcc += dt;
-    const h = 1 / 120;
-    let steps = 0;
-    while (physAcc >= h && steps < 10) {
-      const cols = collidersNear(car.z).concat(trafficColliders());
-      const rc = remoteCollider(); if (rc) cols.push(rc);
-      carStep(car, h, inp, cols, events);
-      physAcc -= h; steps++;
-    }
-    processEvents(events);
-    updateTraffic(dt, car.z);
-    // warnings
-    if (car.engineTemp > 115 && !warnedTemp) { warnedTemp = true; showToast('Engine overheating!', 2200); }
-    if (car.fuel < 0.18 && !warnedFuel) { warnedFuel = true; showToast('Low fuel!', 2200); }
-    if (car.distance > best) { best = car.distance; localStorage.setItem('edweb_best', String(best)); }
-    if (car.dead && state === 'DRIVE') {
-      state = 'DEAD';
-      $('deadReason').textContent = DEAD_TEXT[car.deadReason] || 'The car is done.';
-      $('deadScr').classList.remove('hidden');
-    }
-    // player mesh from sim state
-    const { vf } = carSpeeds(car);
-    wheelSpin += vf * dt / WHEEL_R;
-    playerMesh.group.position.set(car.x, car.y + 0.02 + car.suspY, car.z);
-    playerMesh.group.rotation.y = car.heading;
-    playerMesh.bodyG.rotation.x = car.pitch;
-    playerMesh.bodyG.rotation.z = -car.roll;
-    playerMesh.wheels.forEach((w, i) => {
-      w.rotation.x = wheelSpin;
-      if (i < 2) w.rotation.y = car.steerAngle;
-      w.position.y = car.part[PART.TIRE_FL + i] <= 0.5 ? 0.24 : 0.33;
-    });
-    updateHUD();
-    mpTick(dt);
-    if (AC && engGain) {
-      engOsc.frequency.value = 55 + car.rpm * 0.03;
-      engGain.gain.value = car.dead ? 0 : 0.045;
-    }
-  }
-
-  // ----- cameras -----
-  shake = Math.max(0, shake - dt * 1.4);
-  const shx = (Math.random() * 2 - 1) * shake * 0.14, shy = (Math.random() * 2 - 1) * shake * 0.1;
-  if (state === 'TITLE') {
-    titleT += dt;
-    const a = titleT * 0.12;
-    camera.position.set(car.x + Math.sin(a) * 8.5, 3.1, car.z + Math.cos(a) * 8.5);
-    camera.lookAt(car.x, 0.7, car.z);
-    camera.fov = 60; camera.updateProjectionMatrix();
-    playerMesh.group.position.set(car.x, 0.02, car.z);
-    playerMesh.group.rotation.y = 0.5;
-    updateTraffic(dt, car.z);
-  } else if (camMode === 1 && state !== 'TITLE') {
-    const fx = Math.sin(car.heading), fz = Math.cos(car.heading);
-    cockpit.position.set(car.x, car.y + 0.05, car.z);
-    cockpit.rotation.y = car.heading;
-    cockpit.rotation.x = car.pitch * 0.6;
-    camera.position.set(car.x + fx * 0.3, car.y + 1.14, car.z + fz * 0.3);
-    camera.lookAt(car.x + fx * 10 + shx, car.y + 1.02 + shy, car.z + fz * 10);
-    camera.fov = 72; camera.updateProjectionMatrix();
-    gaugeTimer -= dt;
-    if (gaugeTimer <= 0) { drawGauges(car); gaugeTimer = 0.08; }
-  } else if (camMode === 2 && state === 'DRIVE') {
-    const fxv = Math.sin(freeCam.yaw) * Math.cos(freeCam.pitch), fyv = Math.sin(freeCam.pitch), fzv = Math.cos(freeCam.yaw) * Math.cos(freeCam.pitch);
-    camera.position.set(freeCam.x, freeCam.y, freeCam.z);
-    camera.lookAt(freeCam.x + fxv, freeCam.y + fyv, freeCam.z + fzv);
-    camera.fov = 72; camera.updateProjectionMatrix();
-  } else {
-    const fx = Math.sin(car.heading), fz = Math.cos(car.heading);
-    const want = new THREE.Vector3(car.x - fx * 9.5, car.y + 3.4, car.z - fz * 9.5);
-    const k = 1 - Math.exp(-6 * dt);
-    chasePos.lerp(want, k);
+const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3();
+function updateCamera(dt){
+  const c = car.center(), fr = car.frame();
+  if (camMode === 0){
+    _v1.set(c.x - fr.fwd.x*9 + fr.up.x*3.4, c.y - fr.fwd.y*9 + fr.up.y*3.4, c.z - fr.fwd.z*9 + fr.up.z*3.4);
+    if (!chasePos) chasePos = _v1.clone();
+    chasePos.lerp(_v1, 1 - Math.exp(-dt*4.5));
     camera.position.copy(chasePos);
-    camera.position.x += shx; camera.position.y += shy;
-    camera.lookAt(car.x + fx * 8, car.y + 1.2, car.z + fz * 8);
-    camera.fov = 66; camera.updateProjectionMatrix();
+    _v2.set(c.x + fr.fwd.x*7, c.y + fr.fwd.y*7 + 1.0, c.z + fr.fwd.z*7);
+    camera.lookAt(_v2);
+  } else if (camMode === 1){
+    _v1.set(c.x + fr.up.x*1.02 + fr.fwd.x*0.25, c.y + fr.up.y*1.02 + fr.fwd.y*0.25, c.z + fr.up.z*1.02 + fr.fwd.z*0.25);
+    camera.position.copy(_v1);
+    _v2.set(_v1.x + fr.fwd.x*10, _v1.y + fr.fwd.y*10, _v1.z + fr.fwd.z*10);
+    camera.lookAt(_v2);
+  } else {
+    const sp = (keys['ShiftLeft'] || keys['ShiftRight']) ? 60 : 22;
+    if (keys['ArrowLeft']) free.yaw += dt*1.8;
+    if (keys['ArrowRight']) free.yaw -= dt*1.8;
+    if (keys['ArrowUp']) free.pitch = Math.min(1.2, free.pitch + dt*1.4);
+    if (keys['ArrowDown']) free.pitch = Math.max(-1.2, free.pitch - dt*1.4);
+    const fx = Math.sin(free.yaw)*Math.cos(free.pitch), fy = Math.sin(free.pitch), fz = Math.cos(free.yaw)*Math.cos(free.pitch);
+    const rx = Math.cos(free.yaw), rz = -Math.sin(free.yaw);
+    if (keys['KeyW']){ free.pos.x += fx*sp*dt; free.pos.y += fy*sp*dt; free.pos.z += fz*sp*dt; }
+    if (keys['KeyS']){ free.pos.x -= fx*sp*dt; free.pos.y -= fy*sp*dt; free.pos.z -= fz*sp*dt; }
+    if (keys['KeyA']){ free.pos.x -= rx*sp*dt; free.pos.z -= rz*sp*dt; }
+    if (keys['KeyD']){ free.pos.x += rx*sp*dt; free.pos.z += rz*sp*dt; }
+    if (keys['KeyE'] || keys['Space']) free.pos.y += sp*dt;
+    if (keys['KeyQ']) free.pos.y -= sp*dt;
+    camera.position.copy(free.pos);
+    _v2.set(free.pos.x + fx, free.pos.y + fy, free.pos.z + fz);
+    camera.lookAt(_v2);
   }
-  if (toastTimer > 0) { toastTimer -= dt; if (toastTimer <= 0) $('toast').textContent = ''; }
+}
+
+/* title screen */
+function buildTitle(){
+  const wrap = $('carCards');
+  S.CAR_DEFS.forEach((d, i)=>{
+    const el = document.createElement('div');
+    el.className = 'carCard' + (d===pendingDef ? ' sel' : '');
+    el.innerHTML = '<div class="nm">' + d.name + '</div><div class="bl">' + d.blurb +
+      '</div><div class="ts">Top speed ~' + d.topKmh + ' km/h · key ' + (i+1) + '</div>';
+    el.onclick = ()=>{ pendingDef = d; document.querySelectorAll('.carCard').forEach(x=>x.classList.remove('sel'));
+      el.classList.add('sel'); if (!started) setCar(d.id, 100); };
+    wrap.appendChild(el);
+  });
+  const btns = $('carBtns');
+  S.CAR_DEFS.forEach(d=>{
+    const b = document.createElement('button');
+    b.textContent = d.name; b.dataset.id = d.id;
+    b.onclick = ()=>{ if (started) setCar(d.id, Math.max(100, Math.floor(car.sHint))); };
+    btns.appendChild(b);
+  });
+  $('startBtn').onclick = startGame;
+}
+function startGame(){
+  if (started) return;
+  started = true;
+  $('titleScr').classList.add('hidden');
+  $('hud').classList.remove('hidden');
+  if (!car || carDef !== pendingDef) setCar(pendingDef.id, 100);
+}
+
+/* HUD */
+let hudTick = 0;
+function updateHUD(){
+  if ((hudTick++ % 5) !== 0) return;
+  const kmh = Math.abs(car.forwardSpeed()*3.6);
+  $('speedVal').textContent = kmh.toFixed(0);
+  $('distVal').textContent = (car.distance/1000).toFixed(2) + ' km';
+  const st = car.stats();
+  $('integVal').textContent = st.integrity + '%';
+  const bar = $('integBar');
+  bar.style.width = st.integrity + '%';
+  bar.style.background = st.integrity > 70 ? '#57d957' : st.integrity > 40 ? '#f2b134' : '#e83a2e';
+  $('beamCounts').textContent = 'Beams: ' + st.broken + ' broken · ' + st.deformed + ' bent · ' + st.total + ' total';
+}
+
+/* main loop */
+const clock = new THREE.Clock();
+let orbitT = 0;
+function loop(){
+  requestAnimationFrame(loop);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  lastDt = dt || 1/60;
+  if (car){
+    if (started && !paused){
+      car.step(lastDt, readInput(), world);
+    }
+    updateSkin();
+    updateDebug();
+    updateChunks();
+    if (started){ updateCamera(lastDt); updateHUD(); }
+    else { // title showroom orbit
+      orbitT += dt*0.25;
+      const c = car.center();
+      camera.position.set(c.x + Math.sin(orbitT)*8.5, c.y + 2.6, c.z + Math.cos(orbitT)*8.5);
+      camera.lookAt(c.x, c.y + 0.6, c.z);
+    }
+  }
   renderer.render(scene, camera);
 }
-ensureChunks(0);
-drawGauges(car);
-frame();
+buildTitle();
+setCar(pendingDef.id, 100);
+loop();
 </script>
 </body>
 </html>
