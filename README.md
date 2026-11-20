@@ -7,9 +7,8 @@ built the way BeamNG builds them: out of **nodes and beams**.
 
 ## The beam system
 
-Every car is a structure of 42 mass **nodes** held together by 330–370
-**beams**. A beam is a spring/damper strut between two nodes with two failure
-points:
+Every car is a structure of mass **nodes** held together by **beams**. A beam
+is a spring/damper strut between two nodes with two failure points:
 
 - Push it past its **deform** strain and its rest length permanently changes —
   that's a crumple, and it stays crumpled.
@@ -21,6 +20,52 @@ coming forward on its own momentum until the beams either haul it to a stop
 or break trying. Press **B** in game to watch the skeleton live — green
 beams are intact, orange are bent, red are broken.
 
+The cage is a **regular grid**, generated from each car's own profile:
+evenly spaced cross-sections along the car, each a ring of nodes evenly
+spaced by arc length around a rounded-rectangle cross-section (hood, cabin
+and rear heights interpolated from the car's profile, the roof narrower
+than the floor like a real shell). Rings are triangulated with chords,
+adjacent sections are joined by longitudinal beams and alternating panel
+diagonals, and at higher resolutions extra "skip" chord families run two
+and three sections apart. On top of the grid sit two bumper nodes, four
+suspension mounts, and four wheel nodes with a strut and triangulated
+links each — no distance-based auto-connect anywhere; every beam is
+placed by the generator and can be counted.
+
+## Beam resolution — per car
+
+Each car has its **own resolution setting: a target node count**. The grid
+generator picks the section/ring layout that lands the total node count
+( grid + bumpers + mounts + wheels ) on the target.
+
+- **NORMAL — 150 nodes** (≈600 beams)
+- **HIGH — 250 nodes** (≈1,440 beams)
+- **ULTRA — 500 nodes** (≈2,930 beams)
+- **ULTRA+ — past 500**, `]` keeps adding **+10 nodes** per press, up to
+  **1000 nodes** (≈5,870 beams)
+
+`[` steps back down symmetrically (above 500 in −10 steps, then
+500 → 250 → 150). Changing the setting respawns the current car fresh at
+its position with the new cage. Every car remembers its own setting
+between sessions (localStorage), the title screen shows each car's level
+on its card, and the **T** key toggles an on-screen panel with the current
+car's level, target, actual node count and actual beam count, plus a
+compact per-car list.
+
+The **body scales with the setting**: there is one master body per car,
+and its triangle density follows the node target — each body quad is
+subdivided from 1×1 at 150 nodes (the floor: exactly the original body's
+density, so the car never turns into a blob) up to 6×6 at 1000 nodes.
+Every body vertex is still skinned to its 3 nearest cage nodes, so a finer
+cage also crumples more smoothly. Triangle counts per car run from
+348–408 at 150 nodes to 12,528–14,688 at 1000.
+
+Under the hood, finer cages need softer per-beam rates to stay stable at
+480 Hz; beam forces are therefore subcycled (evaluated twice per step,
+three times past 500 nodes) so the structure can stay stiff without
+ringing, and the parallel chord families keep the shell from sagging
+under its own weight at fine resolutions.
+
 ## The world
 
 - The road generates forever ahead of you, with turns whose curvature changes
@@ -31,11 +76,37 @@ beams are intact, orange are bent, red are broken.
   press R.
 - Trees, rocks and cliff-edge posts are real obstacles the node structure
   collides with, node by node.
+- **Guardrails — sometimes**: on some stretches (favoured on the outside
+  of curves and along cliff edges, always with gaps) a rail on posts runs
+  at the road's edge. It is *not* scenery: the rail is modelled in the
+  physics as a row of overlapping circle obstacles, so cars hit it and
+  stop instead of clipping through.
+- **Imperfect road**: every 150–400 m or so the road has a defect — a
+  pothole (a real dip in the road surface your suspension feels, with a
+  dark patch), a bump (raised, lighter patch), or a crack (visual only).
+  The first stretch from spawn is kept clean.
+- **Nothing decorative is ever placed on the road**: grass, rocks, bushes,
+  trees and barrier posts are all placed in track space with a hard
+  lateral exclusion outside the drivable width.
+- **Grass and dressing**: instanced grass tufts (a few thousand alive at
+  once, recycled with the terrain chunks), extra boulders, bushes and two
+  tree shapes fill out the roadside — all deterministic from the world
+  seed, all visual only.
+
+### Textures
+
+The ground, road and rocks start with procedural canvas textures, so the
+game boots and plays fully offline or from a local file. On first boot it
+also tries to download two real photographic textures (grass/ground and
+rock) from a CORS-enabled CDN and swaps them in when they arrive; if the
+download fails, nothing changes — the procedural textures stay. The road
+band uses its own material, so the photographic ground texture can never
+tint the asphalt or wash out the road markings.
 
 ## The cars
 
-Five cars, each with its own node structure, mass, stiffness, drivetrain and
-a detailed modelled body that crumples with the structure:
+Five cars, each with its own profile, mass, stiffness, drivetrain and a
+detailed modelled body that crumples with the structure:
 
 1. **Sedan** — FWD, balanced all-rounder
 2. **Pickup** — RWD, heavy, open bed
@@ -49,6 +120,8 @@ a detailed modelled body that crumples with the structure:
 - **Space** — handbrake
 - **C** — camera: chase / cockpit / freecam
 - **B** — node & beam skeleton view
+- **[ / ]** — beam resolution down / up for the current car
+- **T** — beam resolution display on/off
 - **1–5** — switch car (fresh car)
 - **R** — reset with a fresh car on the road
 - **F** — repair, only at a full stop
@@ -59,9 +132,24 @@ a detailed modelled body that crumples with the structure:
 A single self-contained `index.html`. The soft-body simulation (nodes,
 beams, plastic deformation, breakage, terrain and cliff physics) runs at
 480 Hz in substeps, in plain JavaScript with no dependencies; rendering by
-Three.js. The physics core is shared verbatim with a Node test suite that
-verifies rest stability, the 100 km/h head-on crash sequence, beam
-thresholds, cliff falls and unclimbability, road blending, and all five cars.
+Three.js. The physics core is shared verbatim with a Node test suite
+(`node test_sim.js`, 18 tests) that verifies rest stability and node/beam
+counts at every preset for all five cars, the 100 km/h head-on crash
+sequence at 150/250/500/620 nodes, beam thresholds, cliff falls and
+unclimbability, road blending, determinism (including barriers and
+defects), the 60-second drive, off-road placement audits, a pothole
+drive-over, body subdivision counts, and all five cars driving at 250
+nodes. Performance, measured headlessly in Node: simulating 10
+physics-seconds takes ≈3.4 s for a 500-node car and ≈7.7 s for a
+1000-node car — faster than real time; the 1000-node tier is the extreme
+opt-in and is the first thing to cost frame rate on weaker hardware.
+
+Known cosmetic residuals, stated plainly: at 250 nodes the SUV parks with
+its rearmost floor nodes just touching the ground (it drives perfectly —
+all five cars pass the 250-node drive test); at the extreme past-Ultra
+counts (620–1000) the shell sags enough that some floor nodes rest on the
+ground when parked, and top speed is drag-limited at 1000 nodes. The
+three named presets (150/250/500) are the tuned tiers.
 
 Note: v1's WebRTC multiplayer is not in this version — it was built for
 v1's straight road and does not fit the new world.
