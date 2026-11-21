@@ -3,7 +3,47 @@ const S = globalThis.__SIM;
 const world = new S.TrackWorld(1337);
 let car = null, carDef = null, lastDt = 1/60;
 
-const renderer = new THREE.WebGLRenderer({ antialias:true });
+/* WebGL startup (v2.4 hardening): context creation is attempted with
+   progressively plainer attributes — antialias first, then without,
+   then with every optional feature off. three r128 throws on the first
+   failure and never retries, and browsers differ in which attribute
+   combinations they accept (Firefox in particular refuses some
+   contexts Chrome accepts, e.g. on driver blocklists or with
+   antialiasing unavailable), so a single attempt used to mean a
+   silent blank page there. If every attempt fails, the boot error box
+   (index.html) explains it in plain words with the technical error. */
+function createRenderer(){
+  const attempts = [
+    { antialias:true },
+    { antialias:false },
+    { antialias:false, stencil:false, depth:true, alpha:false,
+      powerPreference:'default', failIfMajorPerformanceCaveat:false }
+  ];
+  let lastErr = null;
+  for (const attrs of attempts){
+    try { return new THREE.WebGLRenderer(attrs); }
+    catch (e){ lastErr = e; }
+  }
+  throw lastErr || new Error('WebGL context creation failed');
+}
+let renderer;
+try {
+  renderer = createRenderer();
+} catch (e) {
+  if (window.__edShowError) window.__edShowError(
+    'The game could not start its 3D graphics (WebGL). Your browser refused ' +
+    'every WebGL setup the game tried. Check that hardware acceleration is ' +
+    'enabled in the browser settings, update the graphics driver, or try ' +
+    'another browser. The technical error is below.', e);
+  throw e;
+}
+renderer.domElement.addEventListener('webglcontextlost', ev=>{
+  ev.preventDefault();
+  if (window.__edShowError) window.__edShowError(
+    'The graphics context was lost (the GPU or driver reset it), so the game ' +
+    'can no longer draw. Reload the page to restart it.',
+    'webglcontextlost event on the renderer canvas');
+});
 renderer.setPixelRatio(Math.min(window.devicePixelRatio||1, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.getElementById('game').appendChild(renderer.domElement);
@@ -192,18 +232,23 @@ function buildCarMeshes(){
     g.userData.spin = 0;
     scene.add(g); wheelMeshes.push(g);
   }
-  // blob shadow (cheap, always under the car — no shadow-map cost)
+  // blob shadow (cheap, always under the car — no shadow-map cost).
+  // Optional visual: if the 2D canvas or its texture fails for any
+  // reason, the car simply drives without a blob shadow (v2.4 degrade
+  // rule — an optional feature must never kill the scene).
   if (!blobShadow){
-    const cv = document.createElement('canvas'); cv.width = cv.height = 128;
-    const cx2 = cv.getContext('2d');
-    const gr = cx2.createRadialGradient(64,64,8,64,64,62);
-    gr.addColorStop(0,'rgba(0,0,0,0.55)'); gr.addColorStop(1,'rgba(0,0,0,0)');
-    cx2.fillStyle = gr; cx2.fillRect(0,0,128,128);
-    blobShadow = new THREE.Mesh(new THREE.PlaneGeometry(1,1),
-      new THREE.MeshBasicMaterial({ map:new THREE.CanvasTexture(cv), transparent:true, depthWrite:false }));
-    blobShadow.rotation.x = -Math.PI/2; scene.add(blobShadow);
+    try {
+      const cv = document.createElement('canvas'); cv.width = cv.height = 128;
+      const cx2 = cv.getContext('2d');
+      const gr = cx2.createRadialGradient(64,64,8,64,64,62);
+      gr.addColorStop(0,'rgba(0,0,0,0.55)'); gr.addColorStop(1,'rgba(0,0,0,0)');
+      cx2.fillStyle = gr; cx2.fillRect(0,0,128,128);
+      blobShadow = new THREE.Mesh(new THREE.PlaneGeometry(1,1),
+        new THREE.MeshBasicMaterial({ map:new THREE.CanvasTexture(cv), transparent:true, depthWrite:false }));
+      blobShadow.rotation.x = -Math.PI/2; scene.add(blobShadow);
+    } catch (e) { blobShadow = null; }
   }
-  blobShadow.scale.set(carDef.width*1.7, carDef.length*1.25, 1);
+  if (blobShadow) blobShadow.scale.set(carDef.width*1.7, carDef.length*1.25, 1);
   buildDebug();
 }
 function updateSkin(){
@@ -233,12 +278,14 @@ function updateSkin(){
     g.quaternion.setFromRotationMatrix(M);
     g.position.set(nd.pos.x, nd.pos.y, nd.pos.z);
   }
-  // blob shadow under the car
+  // blob shadow under the car (skipped entirely if its creation failed)
   const c = car.center();
-  const gh = world.groundHeight(c.x, c.z, car.sHint);
-  blobShadow.position.set(c.x, gh.h + 0.04, c.z);
-  const hAbove = Math.max(0, c.y - gh.h - 0.5);
-  blobShadow.material.opacity = Math.max(0.12, 0.9 - hAbove*0.10);
+  if (blobShadow){
+    const gh = world.groundHeight(c.x, c.z, car.sHint);
+    blobShadow.position.set(c.x, gh.h + 0.04, c.z);
+    const hAbove = Math.max(0, c.y - gh.h - 0.5);
+    blobShadow.material.opacity = Math.max(0.12, 0.9 - hAbove*0.10);
+  }
 }
 
 /* ---------- debug node/beam overlay (B) ---------- */
