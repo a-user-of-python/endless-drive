@@ -96,7 +96,17 @@ class TrackWorld {
     // the same bucket, so this turns three Map lookups into one
     // integer compare (defectAt itself is unchanged)
     let ds = this._dfc;
-    if (!ds || ds.k0 !== k0){ ds = this._dfc = { k0:k0, d:[this.defectAt(k0), this.defectAt(k0+1), this.defectAt(k0+2)] }; }
+    if (!ds || ds.k0 !== k0){
+      const d0 = this.defectAt(k0), d1 = this.defectAt(k0+1), d2 = this.defectAt(k0+2);
+      ds = this._dfc = { k0:k0, d:[d0, d1, d2],
+        // exact fast reject (v2.6 optimisation): a defect contributes
+        // only when q = ((s-d.s)/d.r)^2 + ((lat-d.lat)/(d.r*0.8))^2 < 4,
+        // which needs |s - d.s| < 2*d.r — outside the bucket's whole
+        // s-window the offset is identically zero, no loop needed
+        sLo: Math.min(d0.s - 2*d0.r, d1.s - 2*d1.r, d2.s - 2*d2.r),
+        sHi: Math.max(d0.s + 2*d0.r, d1.s + 2*d1.r, d2.s + 2*d2.r) };
+    }
+    if (s < ds.sLo || s > ds.sHi) return 0;
     for (let k=k0;k<=k1;k++){
       const d = ds.d[k-k0];
       if (!d.amp) continue;
@@ -241,6 +251,19 @@ class TrackWorld {
     if (ah <= 7.6) return 'grass';
     return this.hill(s, ah) > 6 ? 'rock' : 'grass';
   }
+  /* height-ONLY ground query (v2.6 optimisation): the centre tap of
+     _groundHeightInto without the gradient taps, surface, or normal.
+     The collision pass needs the full query only for the handful of
+     nodes actually penetrating the ground in a substep; every other
+     node needs just the height (for the penetration test itself and
+     the obstacle height gate), and the height computed here is the
+     identical float the full query computes for its centre tap —
+     same nearest-track scan, same elev, same _hAtB call. */
+  _groundHOnly(x, z, sHint, win){
+    const nt = this._ntS || (this._ntS = { s:0, lateral:0, dist:0, index:0 });
+    this._nearestTrackInto(x, z, sHint, nt, win);
+    return this._hAtB(nt.s, nt.lateral, this.elev(nt.s));
+  }
   /* groundHeight into caller-owned scratch objects (the hot loops
      reuse one pair per substep instead of allocating two objects per
      node per substep). groundHeight() below is the allocating
@@ -360,6 +383,23 @@ class Beam {
     // skeleton view colours by it; test 27 checks the zone behaviour.
     this.mat = opts.mat || null;
     this.stress = 0;
+    // v2.6 beam kinds (adapted from BeamNG.drive's documented JBeam
+    // mechanics — see README): 'normal' is the plain spring-damper.
+    // 'support' is a compression-only slack limiter: it exerts NO
+    // spring force while L >= engageLen (= rest x engage, engage < 1)
+    // and acts as a stiff spring-damper in compression only below
+    // that — it can never pull in tension, so it forbids inverted /
+    // folded configurations without adding any parked stiffness.
+    this.kind = opts.kind || 'normal';
+    this.engage = opts.engage || 1;
+    this.engageLen = rest * this.engage;
+    this.engage2 = this.engageLen * this.engageLen;
+    // pressured-beam term (BeamNG PRESSURED idea, simplified): an
+    // extra outward force Fp * min(1, currentRest/L - 1) while
+    // compressed — progressive like air pressure (force grows as
+    // 1/L), capped at Fp so it can never reach the 1/L singularity.
+    // 0 = no pressure term. Used on the strut beams (item C).
+    this.pressure = opts.pressure || 0;
     // cached derived limits (rest/deform/break never change after
     // construction): the hot loops read these instead of re-multiplying
     this.yieldDisp = this.deformStrain * rest;
@@ -402,6 +442,85 @@ class Beam {
     }
     return st;
   }
+}
+
+/* ---------------- Beam force law (v2.6) ----------------
+   One axial force evaluation, shared by the hot loop and the unit
+   tests. L = current length, rel = dL/dt (relative velocity along
+   the axis, positive = separating). Returns the scalar force f with
+   the loop's sign convention: Ft[a] += u*f, Ft[b] -= u*f, u = a->b
+   unit vector — so f > 0 pulls the pair together (tension) and
+   f < 0 pushes them apart (compression).
+   Damping is BAND-LIMITED (BeamNG's dampCutoffHz idea): the raw
+   damping force c*rel is passed through a first-order low-pass
+   whose state lives in the caller's per-beam typed array
+   (dampArr[idx]); alpha is the dt-aware coefficient for the current
+   substep. Instantaneous damping force at 480 Hz on stiff beams is
+   mostly step-to-step noise; the filter removes the noise while
+   passing real damper motion (cutoff ~90 Hz >> the ~3 Hz shell
+   modes and ~10-15 Hz wheel hop), which is what lets the
+   high-damping zones keep their damping without jitter. An impact
+   bypass (DAMP_SNAP_N) keeps the filter from delaying real crash
+   forces: noise is filtered, impacts are not. */
+const DAMP_CUTOFF_HZ = 60;
+/* Impact bypass for the damping filter: if the raw damping force
+   jumps more than this far from the filtered state in one step, the
+   state snaps straight to the raw value. Band-limiting exists to
+   reject step-rate NOISE (small, alternating, sub-kN); a crash is
+   the opposite signal — large and sustained — and delaying crash
+   damping by even a few steps measurably deepens the crush
+   (measured: 100 km/h compression 1.38 m with a pure filter vs
+   1.12 m unfiltered). 2.5 kN sits between the two regimes for
+   every beam class in the fleet. */
+const DAMP_SNAP_N = 2500;
+function dampAlpha(cutoffHz, dt){
+  return 1 - Math.exp(-2*Math.PI*cutoffHz*dt);
+}
+function dampFilterStep(df, fd, alpha){
+  const diff = fd - df;
+  return Math.abs(diff) > DAMP_SNAP_N ? fd : df + alpha*diff;
+}
+function beamAxialForce(b, L, rel, alpha, dampArr, idx){
+  if (b.kind === 'support'){
+    // slack above the engagement length: identically zero force —
+    // the caller early-outs on the squared length before the sqrt,
+    // so this branch is only reached while actually engaged
+    if (L >= b.engageLen){ dampArr[idx] = 0; return 0; }
+    const pen = b.engageLen - L;
+    const fd = b.c * rel;
+    const df = dampFilterStep(dampArr[idx], fd, alpha);
+    dampArr[idx] = df;
+    const f = -b.k * pen + df;
+    // compression only: the damper may resist separation while the
+    // beam is engaged, but the total may never pull in tension
+    return f < 0 ? f : 0;
+  }
+  const disp = L - b.currentRest;
+  let f = b.k * disp;
+  const adisp = Math.abs(disp);
+  // progressive stiffening past yield (see the loop's old comment):
+  // +1x rate on the excess, symmetric both ways
+  if (adisp > b.yieldDisp) f += (disp < 0 ? -1 : 1) * b.k * (adisp - b.yieldDisp);
+  // pressured term: progressive outward push while compressed.
+  // Asymmetric by direction (the same compression/rebound split
+  // BeamNG documents for its dampers): full force while the beam
+  // is shortening, 35% while it extends back — a symmetric pressure
+  // spring returns almost all the energy it absorbed and measurably
+  // fed the suspension's second bounce (pickup drop test: second
+  // bounce 31% of first without pressure, 42% with a symmetric
+  // term; the parked benefit needs only the static force, which
+  // sits at rel ~ 0 on the full-force side).
+  if (b.pressure > 0 && disp < 0){
+    const ratio = b.currentRest/L - 1;
+    let pf = b.pressure * (ratio < 1 ? ratio : 1);
+    if (rel > 0) pf *= 0.35;
+    f -= pf;
+  }
+  const fd = b.c * rel;
+  const df = dampFilterStep(dampArr[idx], fd, alpha);
+  dampArr[idx] = df;
+  f += df;
+  return f;
 }
 
 /* ---------------- Zone materials ----------------
@@ -623,16 +742,78 @@ function ringPoints(P, hwB, hwT, yLow, yTop){
 /* per-car target node count, parallel to CAR_DEFS (default Normal = 150).
    The game persists this in localStorage; tests set it directly. */
 const carRes = CAR_DEFS.map(()=>RES_TARGET_DEFAULT);
+/* v2.6: support-beam build switch (test 38 builds a car with the
+   limiters disabled to measure what they do). Game code never
+   touches this; per-car opt-out is SoftBodyCar's opts.noSupports. */
+const supportOpt = { enabled:true };
 
 /* ---------------- Soft-body car ---------------- */
 class SoftBodyCar {
-  constructor(def, world, targetNodes){
+  constructor(def, world, targetNodes, opts){
     this.def = def; this.world = world;
     this.targetNodes = (targetNodes===undefined ? RES_TARGET_DEFAULT : targetNodes);
+    this.noSupports = !!(opts && opts.noSupports);
     this.buildStructure();
+    // band-limited damping state: one filtered-force slot per beam
+    // (see beamAxialForce). Zeroed here and on repair().
+    this._dampF = new Float64Array(this.beams.length);
+    this.supportCount = 0;
+    for (const b of this.beams) if (b.kind === 'support') this.supportCount++;
     // direct node refs per beam: the hot loops (beam forces, beam
     // limits) index through these instead of nodes[b.a] / nodes[b.b]
     for (const b of this.beams){ b.nA = this.nodes[b.a]; b.nB = this.nodes[b.b]; }
+    // flat per-beam caches for the hot loops (v2.6 optimisation):
+    // beam scalar fields that never change after the build (k, c,
+    // yield displacement, pressure, engagement geometry, limit
+    // squares) plus the force-buffer offsets and the node pos/vel
+    // object refs (node pos/vel objects are mutated in place
+    // everywhere in the sim, never replaced) are copied into flat
+    // arrays once, so addBeamForces / enforceBeamLimits read array
+    // slots instead of chasing beam->node->pos property chains at
+    // ~100k evaluations per frame. The mutable state (currentRest,
+    // broken, deformed, stress) stays on the Beam objects, which
+    // checkDeform / repair() own. The gravity template lets the
+    // flat force buffer be refilled with one typed-array copy.
+    {
+      const nb = this.beams.length;
+      const bk = new Float64Array(nb), bc = new Float64Array(nb),
+            byd = new Float64Array(nb), bpr = new Float64Array(nb),
+            beL = new Float64Array(nb), be2 = new Float64Array(nb),
+            bhi = new Float64Array(nb), blo = new Float64Array(nb),
+            bsup = new Uint8Array(nb), bfil = new Uint8Array(nb),
+            bfa = new Int32Array(nb), bfb = new Int32Array(nb),
+            bpA = new Array(nb), bvA = new Array(nb),
+            bpB = new Array(nb), bvB = new Array(nb);
+      for (let i=0;i<nb;i++){
+        const b = this.beams[i];
+        bk[i] = b.k; bc[i] = b.c; byd[i] = b.yieldDisp; bpr[i] = b.pressure;
+        beL[i] = b.engageLen; be2[i] = b.engage2; bhi[i] = b.hi2; blo[i] = b.lo2;
+        bsup[i] = b.kind === 'support' ? 1 : 0;
+        // band-limit scoping (v2.6 optimisation): the damping filter
+        // runs in the hot loop only on the high-damping beams —
+        // c >= 1000 N.s/m, which in this fleet is exactly the four
+        // strut dampers (per-car suspDamp 3200-4200; every other
+        // beam's c is zeta-scaled and tops out near 600). Those are
+        // the dampers whose raw force is large enough to carry the
+        // step-rate noise the filter exists to reject, and whose
+        // filtering the wobble/suspension behaviour is tuned on;
+        // the remaining beams take their raw damping force (their
+        // filter state is still written, = the raw force, so the
+        // state stays coherent). beamAxialForce — the standalone
+        // law the unit tests pin — is NOT scoped; this is a
+        // loop-level change only.
+        bfil[i] = b.c >= 1000 ? 1 : 0;
+        bfa[i] = b.a*3; bfb[i] = b.b*3;
+        bpA[i] = b.nA.pos; bvA[i] = b.nA.vel; bpB[i] = b.nB.pos; bvB[i] = b.nB.vel;
+      }
+      this._bk = bk; this._bc = bc; this._byd = byd; this._bpr = bpr;
+      this._beL = beL; this._be2 = be2; this._bhi2 = bhi; this._blo2 = blo;
+      this._bsup = bsup; this._bfil = bfil; this._bfa = bfa; this._bfb = bfb;
+      this._bpA = bpA; this._bvA = bvA; this._bpB = bpB; this._bvB = bvB;
+      const grav = new Float64Array(this.nodes.length*3);
+      for (let i=0;i<this.nodes.length;i++) grav[i*3+1] = -9.81*this.nodes[i].mass;
+      this._gravF = grav;
+    }
     // beam subcycle count for this cage (used in substep). v2.5: the
     // schedule is 2 at every target above Normal — v2.4 ran 3 past 500
     // nodes, which cost ~50% more beam evaluations than 2 for margin
@@ -649,7 +830,12 @@ class SoftBodyCar {
     // stiffness).
     {
       const sumK = new Float64Array(this.nodes.length);
-      for (const b of this.beams){ sumK[b.a] += b.k; sumK[b.b] += b.k; }
+      // support beams are excluded: they are slack in every normal
+      // configuration, so they contribute nothing to the cage's
+      // standing nodal frequencies — counting them would raise the
+      // subcycle (and the beam-eval cost) for stiffness that only
+      // exists transiently inside a crash fold
+      for (const b of this.beams){ if (b.kind === 'support') continue; sumK[b.a] += b.k; sumK[b.b] += b.k; }
       let wMax = 0;
       for (let i=0;i<this.nodes.length;i++){
         const w = Math.sqrt(sumK[i]/this.nodes[i].mass);
@@ -1202,9 +1388,108 @@ class SoftBodyCar {
         // locating links keep their zeta-0.7 rate against rm.
         beams.push(new Beam(wi, ti, d, { k:kk,
           c:(tiIdx===0 ? def.suspDamp : 0.7*2*Math.sqrt(kk*rm)),
+          // v2.6 pressured strut (item C): the strut is the element
+          // that carries the corner load in this engine (the wheel is
+          // a single node — there are no hub/rim radial beams), so it
+          // gets the pressured-beam term: a progressive outward force
+          // ~2.5x the static corner load at the 1/L cap, which makes
+          // the corner stiffen as it compresses instead of staying a
+          // pure linear spring. Locating links stay plain springs.
+          pressure:(tiIdx===0 ? (def.mass*9.81/4)*2.5 : 0),
           deformStrain:0.3, breakStrain:0.75, suspension:true, mat:'suspension' }));
       });
     });
+    /* ---- support beams (v2.6, item A) ----
+       Compression-only slack limiters, adapted from BeamNG.drive's
+       documented SUPPORT beam type: no force at all while the beam
+       is longer than rest x 0.85, a stiff spring-damper in
+       compression only below that, never any tension. Their job is
+       to forbid configurations the normal beams reach only after
+       large deformation: a ring folding flat or inverting (roof
+       centre driven through the floor line), and the cabin band
+       telescoping roof-into-floor. Because they are slack in every
+       normal configuration they add NO parked stiffness — the
+       parked shape, the settle matrix and sleep are untouched —
+       which is exactly why they are supports and not more normal
+       beams (an extra stiff normal beam here would spend the
+       480 Hz stability budget full-time; see the addBeam damping
+       comment). Geometry per ring: top-centre -> both floor
+       quarters and bottom-centre -> both roof quarters (the two
+       diagonals whose shortening IS a ring squash/inversion), plus
+       top-centre -> next section's floor quarters across the cabin
+       band. Pairs that already carry a normal beam are skipped —
+       that pair already resists both ways. Supports never deform
+       or break (thresholds set absurdly high): a limiter that
+       yielded would stop limiting. */
+    if (supportOpt.enabled && !this.noSupports){
+      const pairSet = new Set(beams.map(b => b.a < b.b ? b.a + '_' + b.b : b.b + '_' + b.a));
+      const pickInRing = (ids, tx, ty)=>{
+        let best = -1, bd = 1e18;
+        for (const id of ids){
+          const r = nodes[id].rest;
+          const dd = (r.x-tx)*(r.x-tx) + (r.y-ty)*(r.y-ty);
+          if (dd < bd){ bd = dd; best = id; }
+        }
+        return best;
+      };
+      const addSupport = (a, b, kFac, matName)=>{
+        if (a < 0 || b < 0 || a === b) return;
+        const key = a < b ? a + '_' + b : b + '_' + a;
+        if (pairSet.has(key)) return;
+        pairSet.add(key);
+        const A = nodes[a].rest, B = nodes[b].rest;
+        const dx=B.x-A.x, dy=B.y-A.y, dz=B.z-A.z, d = Math.sqrt(dx*dx+dy*dy+dz*dz);
+        if (d < 1e-6) return;
+        const rm = 2*nodes[a].mass*nodes[b].mass/(nodes[a].mass+nodes[b].mass);
+        const M = MATERIALS[matName];
+        const k = def.stiff * clamp(1.15 - d*0.12, 0.7, 1.15) * M.kScale * resK * kFac;
+        beams.push(new Beam(a, b, d, { k:k, c:0.13*2*Math.sqrt(k*rm),
+          deformStrain:50, breakStrain:50, plasticScale:0, mat:matName,
+          kind:'support', engage:0.85 }));
+      };
+      const ringPick = [];
+      for (let i=0;i<S;i++){
+        const prof = profileAt(def, this.secZ[i]);
+        const hwB = W*0.5*prof.hw, hwT = hwB*0.8;
+        const yLow = prof.yLow + (def.rideBoost||0), yTop = prof.yTop;
+        const ids = this.secRings[i];
+        ringPick.push({
+          topC: pickInRing(ids, 0, yTop), botC: pickInRing(ids, 0, yLow),
+          floorL: pickInRing(ids, -hwB*0.5, yLow), floorR: pickInRing(ids, hwB*0.5, yLow),
+          roofL: pickInRing(ids, -hwT*0.5, yTop), roofR: pickInRing(ids, hwT*0.5, yTop)
+        });
+      }
+      // supported rings are THINNED at fine grids: a limiter every
+      // ~16 rings-worth of sections is the same physical spacing at
+      // every resolution (at S=98 the rings sit 5 cm apart — a
+      // limiter on every one would be hundreds of beams forbidding
+      // the same folds). End rings are always supported. (v2.6
+      // optimisation pass: the stride denominator went 28 -> 16 —
+      // at 500 nodes the sedan's support count drops 160 -> ~105
+      // and at 1000 176 -> ~115, while the limiters that remain
+      // still span the same rings the fold test exercises at 150
+      // nodes, where the stride is 1 either way.)
+      const stride = Math.max(1, Math.round(S/16));
+      const supRings = [];
+      for (let i=0;i<S;i+=stride) supRings.push(i);
+      if (supRings[supRings.length-1] !== S-1) supRings.push(S-1);
+      for (const i of supRings){
+        const rp = ringPick[i];
+        addSupport(rp.topC, rp.floorL, ringK, 'frame');
+        addSupport(rp.topC, rp.floorR, ringK, 'frame');
+        addSupport(rp.botC, rp.roofL, ringK, 'frame');
+        addSupport(rp.botC, rp.roofR, ringK, 'frame');
+      }
+      const kLngS = Math.min(4.5, Math.pow(Math.max(1, S-1)/13, 0.7));
+      for (let g=0; g<supRings.length-1; g++){
+        const i = supRings[g], j = supRings[g+1];
+        if (Math.abs(this.secZ[i]) > 0.34 || Math.abs(this.secZ[j]) > 0.34) continue;
+        addSupport(ringPick[i].topC, ringPick[j].floorL, kLngS, 'cabin');
+        addSupport(ringPick[i].topC, ringPick[j].floorR, kLngS, 'cabin');
+        addSupport(ringPick[j].topC, ringPick[i].floorL, kLngS, 'cabin');
+        addSupport(ringPick[j].topC, ringPick[i].floorR, kLngS, 'cabin');
+      }
+    }
     this.beams = beams;
     // nose reference for crash measurement: bottom-centre node of the
     // section nearest z = +0.17L — the same physical gauge depth the
@@ -1272,6 +1557,7 @@ class SoftBodyCar {
   repair(){
     this.asleep = false; this._quietT = 0; // repair always wakes the car
     for (const b of this.beams){ b.broken = false; b.deformed = false; b.currentRest = b.rest; b.maxStrain = 0; b.stress = 0; }
+    if (this._dampF) this._dampF.fill(0);
     const c = this.center(), f = this.frame(), v = this.centerVel();
     this.setPoseFrame(c.x, c.y, c.z, f.right, f.up, f.fwd, v.x, v.y, v.z);
   }
@@ -1286,16 +1572,25 @@ class SoftBodyCar {
   // further out is removed. Broken beams are exempt — a detached part
   // stays detached. Within the limit this is a strict no-op.
   enforceBeamLimits(){
-    for (const b of this.beams){
+    const beamsL = this.beams;
+    // flat caches (see the constructor): pos/vel object refs and the
+    // squared limit bounds as array slots — the projection path below
+    // (rare) still reads the Beam object's own rest/maxDisp/masses,
+    // so the arithmetic is unchanged
+    const bpA = this._bpA, bpB = this._bpB, bvA = this._bvA, bvB = this._bvB,
+          bhi2 = this._bhi2, blo2 = this._blo2;
+    for (let bi=0; bi<beamsL.length; bi++){
+      const b = beamsL[bi];
       if (b.broken) continue;
-      const A = b.nA, B = b.nB;
-      const dx = B.pos.x-A.pos.x, dy = B.pos.y-A.pos.y, dz = B.pos.z-A.pos.z;
+      const pA = bpA[bi], pB = bpB[bi];
+      const dx = pB.x-pA.x, dy = pB.y-pA.y, dz = pB.z-pA.z;
       // squared-distance pre-check: a beam inside [loDisp, hiDisp]
       // needs no projection, and that is nearly every beam nearly all
       // the time — skip the sqrt for them (identical outcome: the
       // projection below is a no-op inside the limit by definition)
       const d2 = dx*dx + dy*dy + dz*dz;
-      if (d2 <= b.hi2 && (b.loDisp <= 0 || d2 >= b.lo2)) continue;
+      if (d2 <= bhi2[bi] && (b.loDisp <= 0 || d2 >= blo2[bi])) continue;
+      const A = b.nA, B = b.nB;
       const L = Math.sqrt(d2); if (L < 1e-6) continue;
       const disp = L - b.rest, adisp = Math.abs(disp);
       if (adisp <= b.maxDisp) continue;
@@ -1303,15 +1598,16 @@ class SoftBodyCar {
       const corr = adisp - b.maxDisp;
       const imA = 1/A.mass, imB = 1/B.mass, imSum = imA + imB;
       const wA = imA/imSum, wB = imB/imSum;
-      A.pos.x += ux*s*corr*wA; A.pos.y += uy*s*corr*wA; A.pos.z += uz*s*corr*wA;
-      B.pos.x -= ux*s*corr*wB; B.pos.y -= uy*s*corr*wB; B.pos.z -= uz*s*corr*wB;
+      pA.x += ux*s*corr*wA; pA.y += uy*s*corr*wA; pA.z += uz*s*corr*wA;
+      pB.x -= ux*s*corr*wB; pB.y -= uy*s*corr*wB; pB.z -= uz*s*corr*wB;
       // kill only the velocity component carrying the pair FURTHER past
       // the limit; motion back toward the limit is the elastic recovery
       // and is left alone
-      const rel = (B.vel.x-A.vel.x)*ux + (B.vel.y-A.vel.y)*uy + (B.vel.z-A.vel.z)*uz;
+      const vA = bvA[bi], vB = bvB[bi];
+      const rel = (vB.x-vA.x)*ux + (vB.y-vA.y)*uy + (vB.z-vA.z)*uz;
       if (s*rel > 0){
-        A.vel.x += ux*rel*wA; A.vel.y += uy*rel*wA; A.vel.z += uz*rel*wA;
-        B.vel.x -= ux*rel*wB; B.vel.y -= uy*rel*wB; B.vel.z -= uz*rel*wB;
+        vA.x += ux*rel*wA; vA.y += uy*rel*wA; vA.z += uz*rel*wA;
+        vB.x -= ux*rel*wB; vB.y -= uy*rel*wB; vB.z -= uz*rel*wB;
       }
     }
   }
@@ -1348,7 +1644,8 @@ class SoftBodyCar {
     if (beta <= 0) return;
     const nodes = this.nodes;
     let M = 0, cx = 0, cy = 0, cz = 0, vx = 0, vy = 0, vz = 0;
-    for (const n of nodes){
+    for (let ni=0; ni<nodes.length; ni++){
+      const n = nodes[ni];
       M += n.mass;
       cx += n.mass*n.pos.x; cy += n.mass*n.pos.y; cz += n.mass*n.pos.z;
       vx += n.mass*n.vel.x; vy += n.mass*n.vel.y; vz += n.mass*n.vel.z;
@@ -1358,7 +1655,8 @@ class SoftBodyCar {
     // angular momentum L and inertia tensor I of the current cloud
     let Lx = 0, Ly = 0, Lz = 0;
     let Ixx = 0, Ixy = 0, Ixz = 0, Iyy = 0, Iyz = 0, Izz = 0;
-    for (const n of nodes){
+    for (let ni=0; ni<nodes.length; ni++){
+      const n = nodes[ni];
       const rx = n.pos.x-cx, ry = n.pos.y-cy, rz = n.pos.z-cz;
       const wx = n.vel.x-vx, wy = n.vel.y-vy, wz = n.vel.z-vz;
       Lx += n.mass*(ry*wz - rz*wy);
@@ -1379,7 +1677,8 @@ class SoftBodyCar {
       oy = (Ixx*(Ly*Izz - Iyz*Lz) - Lx*(Ixy*Izz - Iyz*Ixz) + Ixz*(Ixy*Lz - Ly*Ixz)) / det;
       oz = (Ixx*(Iyy*Lz - Ly*Iyz) - Ixy*(Ixy*Lz - Ly*Ixz) + Lx*(Ixy*Iyz - Iyy*Ixz)) / det;
     }
-    for (const n of nodes){
+    for (let ni=0; ni<nodes.length; ni++){
+      const n = nodes[ni];
       const rx = n.pos.x-cx, ry = n.pos.y-cy, rz = n.pos.z-cz;
       const gx = vx + (oy*rz - oz*ry);
       const gy = vy + (oz*rx - ox*rz);
@@ -1511,55 +1810,127 @@ class SoftBodyCar {
     // tyres and contacts see, and without softening the structure.
     // force buffer reused across substeps (was a fresh array of fresh
     // objects every substep — the single biggest allocation source in
-    // the hot loop)
-    if (!this._F || this._F.length !== nodes.length)
-      this._F = nodes.map(n=>({ x:0, y:-9.81*n.mass, z:0 }));
+    // the hot loop). v2.6 optimisation: the buffers are now FLAT
+    // Float64Arrays (x,y,z per node at i*3), refilled from the
+    // gravity template with one typed-array copy per substep; every
+    // force writer below (beams, wheels, aero, integration) indexes
+    // the flat slots. The values written are the identical floats in
+    // the identical order — only the storage changed.
+    if (!this._F || this._F.length !== nodes.length*3)
+      this._F = new Float64Array(nodes.length*3);
     const F = this._F;
-    for (let i=0;i<nodes.length;i++){ const Fi = F[i]; Fi.x = 0; Fi.y = -9.81*nodes[i].mass; Fi.z = 0; }
+    F.set(this._gravF);
     const sub2N = this.sub2N || 1;
-    if (!this._Fs || this._Fs.length !== nodes.length)
-      this._Fs = nodes.map(()=>({ x:0, y:0, z:0 }));
+    if (!this._Fs || this._Fs.length !== nodes.length*3)
+      this._Fs = new Float64Array(nodes.length*3);
+    // band-limited damping coefficient for this substep's beam
+    // subcycle step (hh = h/sub2N, computed in the integration loop
+    // below — the same value, since sub2N is fixed per car)
+    const dampAlphaV = dampAlpha(DAMP_CUTOFF_HZ, h/sub2N);
+    const beamsL = this.beams, dampFL = this._dampF;
+    // flat per-beam caches (built once in the constructor): every
+    // per-evaluation read below is an array slot, not a property
+    // chain — the arithmetic itself is unchanged
+    const bkA = this._bk, bcA = this._bc, bydA = this._byd, bprA = this._bpr,
+          beLA = this._beL, be2A = this._be2, bsupA = this._bsup, bfilA = this._bfil,
+          bfaA = this._bfa, bfbA = this._bfb,
+          bpA = this._bpA, bvA = this._bvA, bpB = this._bpB, bvB = this._bvB;
     const addBeamForces = (Ft, doDeform)=>{
-      for (const b of this.beams){
+      // indexed loop over hoisted locals (v2.6 optimisation): no
+      // iterator protocol, beamEvals accumulated in a local and
+      // flushed once per call (the count is identical)
+      let ev = 0;
+      for (let bi=0; bi<beamsL.length; bi++){
+        const b = beamsL[bi];
         if (b.broken) continue;
-        this.beamEvals++;
-        const A = b.nA, B = b.nB;
-        const dx = B.pos.x-A.pos.x, dy = B.pos.y-A.pos.y, dz = B.pos.z-A.pos.z;
-        const L = Math.sqrt(dx*dx+dy*dy+dz*dz); if (L < 1e-6) continue;
+        ev++;
+        const pA = bpA[bi], pB = bpB[bi];
+        const dx = pB.x-pA.x, dy = pB.y-pA.y, dz = pB.z-pA.z;
+        const d2 = dx*dx + dy*dy + dz*dz;
+        // support beams above their engagement length exert exactly
+        // zero force (that is their definition), so the squared-
+        // length check replaces the sqrt for the overwhelmingly
+        // common disengaged case — an exact early-out, not an
+        // approximation. (A normal-beam deadband skip was considered
+        // and rejected: the skipped force there is small but not
+        // provably negligible across every zone and load.)
+        if (bsupA[bi] && d2 >= be2A[bi]){ dampFL[bi] = 0; continue; }
+        const L = Math.sqrt(d2); if (L < 1e-6) continue;
         const ux = dx/L, uy = dy/L, uz = dz/L;
-        const rvx = B.vel.x-A.vel.x, rvy = B.vel.y-A.vel.y, rvz = B.vel.z-A.vel.z;
-        const rel = rvx*ux + rvy*uy + rvz*uz;
-        // elastic core + progressive stiffening past the yield point: a
-        // beam is a plain spring inside its yield displacement, but the
-        // further it is pushed past yield — stretched OR compressed — the
-        // harder it pushes back (an added 1x rate on the excess, so the
-        // rate past yield is 2x in total). Real elastics and steel both
-        // do this; a purely linear beam just keeps giving at the same
-        // rate until it breaks, which lets a crushed zone fold away
-        // instead of holding the cage together. Symmetric both ways:
-        // resisting collapse matters as much as resisting being torn
-        // apart. The added rate is a plain multiplier on the beam's own
-        // k, so it inherits the per-resolution rate scaling (resK) and
-        // the beam subcycling. It is kept at 1x on purpose: at 3x the
-        // stiffest car (the coupe) went unstable in its spawn settle —
-        // past-yield beams are exactly the ones carrying the transient
-        // loads there, and doubling their rate is what the 480 Hz
-        // integration budget affords.
-        const disp = L - b.currentRest;
-        let f = b.k*disp;
-        const yieldDisp = b.yieldDisp, adisp = Math.abs(disp);
-        // live stress: elastic strain relative to the material yield
-        // (1.0 = yielding) — read by the B skeleton view and test 27.
-        // Refreshed on the deform subcycle only (still every substep):
-        // it is a readout, not physics, and the division is not free
-        // at 47k-141k evaluations per step.
-        if (doDeform) b.stress = adisp/yieldDisp;
-        if (adisp > yieldDisp) f += Math.sign(disp) * b.k * (adisp - yieldDisp) * 1;
-        f += b.c*rel;
-        Ft[b.a].x += ux*f; Ft[b.a].y += uy*f; Ft[b.a].z += uz*f;
-        Ft[b.b].x -= ux*f; Ft[b.b].y -= uy*f; Ft[b.b].z -= uz*f;
-        if (doDeform && !this.noDeform) b.checkDeform(nodes, h, L);
+        const vA = bvA[bi], vB = bvB[bi];
+        const rel = (vB.x-vA.x)*ux + (vB.y-vA.y)*uy + (vB.z-vA.z)*uz;
+        // The force law is INLINED here (v2.6 optimisation: at
+        // ~100k evaluations per frame a per-beam function call was
+        // measurable). beamAxialForce above is the same law in
+        // standalone form for the unit tests — keep the two in sync:
+        // the unit tests (37/39/41) pin the function's numbers and
+        // the car-level tests (2/26/27/28/33/34) pin the loop's, so
+        // a drift between them fails one family or the other.
+        let f;
+        if (bsupA[bi]){
+          const pen = beLA[bi] - L;
+          const fd = bcA[bi] * rel;
+          const df0 = dampFL[bi], dd = fd - df0;
+          const df = Math.abs(dd) > DAMP_SNAP_N ? fd : df0 + dampAlphaV*dd;
+          dampFL[bi] = df;
+          f = -bkA[bi] * pen + df;
+          if (f > 0) f = 0; // compression only — never tension
+          if (doDeform) b.stress = 0; // slack limiters carry no standing load
+        } else {
+          const disp = L - b.currentRest;
+          f = bkA[bi] * disp;
+          const adisp = Math.abs(disp);
+          const yd = bydA[bi];
+          if (adisp > yd) f += (disp < 0 ? -1 : 1) * bkA[bi] * (adisp - yd);
+          const pr = bprA[bi];
+          if (pr > 0 && disp < 0){
+            const ratio = b.currentRest/L - 1;
+            let pf = pr * (ratio < 1 ? ratio : 1);
+            if (rel > 0) pf *= 0.35;
+            f -= pf;
+          }
+          const fd = bcA[bi] * rel;
+          // band-limited damping, scoped (see the constructor's
+          // _bfil note): filtered on the high-damping beams, raw
+          // elsewhere — the filter's load/fma/store per evaluation
+          // was measurable at ~37M evaluations per test run
+          let df;
+          if (bfilA[bi]){
+            const df0 = dampFL[bi], dd = fd - df0;
+            df = Math.abs(dd) > DAMP_SNAP_N ? fd : df0 + dampAlphaV*dd;
+          } else df = fd;
+          dampFL[bi] = df;
+          f += df;
+          if (doDeform){
+            // live stress: elastic strain relative to the material
+            // yield (1.0 = yielding) — read by the B skeleton view
+            // and test 27. Deform subcycle only (still every
+            // substep): a readout, not physics, and the division is
+            // not free at 47k-141k evaluations per step.
+            b.stress = adisp/yd;
+            // plasticity/break bookkeeping, guarded (v2.6
+            // optimisation): checkDeform is a strict no-op unless
+            // the strain against the ORIGINAL rest passes the
+            // deform threshold (the break threshold is higher than
+            // the deform threshold for every normal-beam material,
+            // and supports never reach this branch), so the call is
+            // skipped for the overwhelming majority of beams whose
+            // strain — the identical float checkDeform would
+            // compute from the L already measured here — is below
+            // it. Outcomes are unchanged.
+            if (!this.noDeform){
+              const ast = Math.abs((L - b.rest)/b.rest);
+              if (ast > b.deformStrain) b.checkDeform(nodes, h, L);
+            }
+          }
+        }
+        if (f !== 0){
+          const fa = bfaA[bi], fb = bfbA[bi];
+          Ft[fa] += ux*f; Ft[fa+1] += uy*f; Ft[fa+2] += uz*f;
+          Ft[fb] -= ux*f; Ft[fb+1] -= uy*f; Ft[fb+2] -= uz*f;
+        }
       }
+      this.beamEvals += ev;
     };
     // (No anti-roll-bar coupling: an undamped differential spring between
     // the struts resonated with the wheel-hop mode and made tall cars MORE
@@ -1569,12 +1940,14 @@ class SoftBodyCar {
     const totalMass = def.mass;
     for (let w=0; w<4; w++){
       const wi = this.wheelIdx[w], n = nodes[wi];
-      // win=40: a node of this car is never more than ~15 m of
+      const mi = this.mountIdx[w], wi3 = wi*3, mi3 = mi*3;
+      // win=20: a node of this car is never more than ~15 m of
       // along-track from the car's own s (centre s + car length +
-      // crash scatter), so the nearest-sample scan can use a 40 m
-      // window instead of the general 140 m one — same result, a
-      // third of the scan. The public groundHeight keeps 140 m.
-      const gh = ghS; world._groundHeightInto(n.pos.x, n.pos.z, this.sHint, gh, gh.normal, 40);
+      // crash scatter), so the nearest-sample scan can use a 20 m
+      // window instead of the general 140 m one — same result (the
+      // window still covers the ~15 m bound with margin), under
+      // half the scan. The public groundHeight keeps 140 m.
+      const gh = ghS; world._groundHeightInto(n.pos.x, n.pos.z, this.sHint, gh, gh.normal, 20);
       const contact = (n.pos.y - gh.h) <= def.wheelR + 0.07;
       this['contact'+w] = contact;
       if (!contact){
@@ -1624,8 +1997,7 @@ class SoftBodyCar {
       // transmits this force to the chassis anyway, and applying it all to
       // the 13 kg wheel node makes the response numerically stiff and
       // starves the chassis of yaw damping (fishtailing)
-      F[wi].x += gx*0.4; F[wi].y += gy*0.4; F[wi].z += gz*0.4;
-      const mi = this.mountIdx[w];
+      F[wi3] += gx*0.4; F[wi3+1] += gy*0.4; F[wi3+2] += gz*0.4;
       if (this.targetNodes > RES_TARGET_DEFAULT){
         // high-resolution cages hold their mounts more softly, and the
         // cross-coupled loop (force from the WHEEL's velocity applied at
@@ -1640,9 +2012,9 @@ class SoftBodyCar {
         let mx = -mLatX*loadMass*gripRate, my = -mLatY*loadMass*gripRate, mz = -mLatZ*loadMass*gripRate;
         const ml = Math.sqrt(mx*mx+my*my+mz*mz);
         if (ml > gCap && ml > 0){ const sc = gCap/ml; mx*=sc; my*=sc; mz*=sc; }
-        F[mi].x += mx*0.6; F[mi].y += my*0.6; F[mi].z += mz*0.6;
+        F[mi3] += mx*0.6; F[mi3+1] += my*0.6; F[mi3+2] += mz*0.6;
       } else {
-        F[mi].x += gx*0.6; F[mi].y += gy*0.6; F[mi].z += gz*0.6;
+        F[mi3] += gx*0.6; F[mi3+1] += gy*0.6; F[mi3+2] += gz*0.6;
       }
       // longitudinal
       const vF = n.vel.x*dx + n.vel.y*dy + n.vel.z*dz;
@@ -1655,24 +2027,23 @@ class SoftBodyCar {
         // half the drive force enters at the strut mount (chassis height):
         // applying it all at the light wheel node surges the wheel and
         // drags the nose down through the diagonal suspension links
-        const mi = this.mountIdx[w];
-        F[wi].x += dx*f*0.5; F[wi].y += dy*f*0.5; F[wi].z += dz*f*0.5;
-        F[mi].x += dx*f*0.5; F[mi].y += dy*f*0.5; F[mi].z += dz*f*0.5;
+        F[wi3] += dx*f*0.5; F[wi3+1] += dy*f*0.5; F[wi3+2] += dz*f*0.5;
+        F[mi3] += dx*f*0.5; F[mi3+1] += dy*f*0.5; F[mi3+2] += dz*f*0.5;
       }
       if (driven && input.reverse > 0){
         let f = input.reverse * def.engineForce*0.45 / nDriven;
         f = Math.min(f, mu*load);
-        if (vF > 0.5){ const bf = Math.min(vF*loadMass*6, mu*load*1.4); fLongMag = bf; F[wi].x -= dx*bf; F[wi].y -= dy*bf; F[wi].z -= dz*bf; }
-        else { fLongMag = f; F[wi].x -= dx*f; F[wi].y -= dy*f; F[wi].z -= dz*f; }
+        if (vF > 0.5){ const bf = Math.min(vF*loadMass*6, mu*load*1.4); fLongMag = bf; F[wi3] -= dx*bf; F[wi3+1] -= dy*bf; F[wi3+2] -= dz*bf; }
+        else { fLongMag = f; F[wi3] -= dx*f; F[wi3+1] -= dy*f; F[wi3+2] -= dz*f; }
       } else if (input.brake){
         const bf = clamp(-vF*loadMass*6, -mu*load*1.5, mu*load*1.5);
         fLongMag = Math.abs(bf);
-        F[wi].x += dx*bf; F[wi].y += dy*bf; F[wi].z += dz*bf;
+        F[wi3] += dx*bf; F[wi3+1] += dy*bf; F[wi3+2] += dz*bf;
       }
       if (input.handbrake && !isFront){
         const bf = clamp(-vF*loadMass*5, -mu*load*1.3, mu*load*1.3);
         fLongMag = Math.max(fLongMag, Math.abs(bf));
-        F[wi].x += dx*bf; F[wi].y += dy*bf; F[wi].z += dz*bf;
+        F[wi3] += dx*bf; F[wi3+1] += dy*bf; F[wi3+2] += dz*bf;
       }
       if (!input.throttle && !input.reverse && !input.brake){
         // parking hold at crawl speed (spring-like, capped by traction);
@@ -1683,11 +2054,11 @@ class SoftBodyCar {
         if (Math.abs(vF) < 2.5) rf = clamp(-vF * loadMass * 8, -mu*load*1.2, mu*load*1.2);
         else rf = -Math.sign(vF) * (0.012*load + Math.abs(vF)*6);
         fLongMag = Math.abs(rf);
-        F[wi].x += dx*rf; F[wi].y += dy*rf; F[wi].z += dz*rf;
+        F[wi3] += dx*rf; F[wi3+1] += dy*rf; F[wi3+2] += dz*rf;
       } else {
         const rf = -clamp(vF * 30, -42, 42);
         fLongMag = Math.max(fLongMag, Math.abs(rf));
-        F[wi].x += dx*rf; F[wi].y += dy*rf; F[wi].z += dz*rf;
+        F[wi3] += dx*rf; F[wi3+1] += dy*rf; F[wi3+2] += dz*rf;
       }
       // tire temperature: slip power heats, exponential approach to
       // ambient cools. Slip speed = lateral slip + a longitudinal
@@ -1711,7 +2082,7 @@ class SoftBodyCar {
     const spd = Math.sqrt(cvX*cvX+cvY*cvY+cvZ*cvZ);
     if (spd > 0.1){
       const dragA = def.drag * spd; // accel per unit velocity
-      for (let i=0;i<nodes.length;i++){ F[i].x -= cvX*dragA*nodes[i].mass; F[i].y -= cvY*dragA*nodes[i].mass*0.3; F[i].z -= cvZ*dragA*nodes[i].mass; }
+      for (let i=0, i3=0;i<nodes.length;i++, i3+=3){ F[i3] -= cvX*dragA*nodes[i].mass; F[i3+1] -= cvY*dragA*nodes[i].mass*0.3; F[i3+2] -= cvZ*dragA*nodes[i].mass; }
     }
     // integrate (beam forces subcycled at high resolution — see above)
     const hh = h/sub2N;
@@ -1719,12 +2090,12 @@ class SoftBodyCar {
       let Ft = F;
       if (sub2N > 1){
         Ft = this._Fs;
-        for (let i=0;i<nodes.length;i++){ Ft[i].x = F[i].x; Ft[i].y = F[i].y; Ft[i].z = F[i].z; }
+        Ft.set(F); // flat copy of the external forces into the subcycle buffer
       }
       addBeamForces(Ft, s2 === sub2N-1);
-      for (let i=0;i<nodes.length;i++){
+      for (let i=0, i3=0;i<nodes.length;i++, i3+=3){
         const n = nodes[i], im = hh/n.mass;
-        n.vel.x += Ft[i].x*im; n.vel.y += Ft[i].y*im; n.vel.z += Ft[i].z*im;
+        n.vel.x += Ft[i3]*im; n.vel.y += Ft[i3+1]*im; n.vel.z += Ft[i3+2]*im;
         // safety clamp: the sim must never explode (squared pre-check:
         // the sqrt only runs for a node actually past the limit)
         const sv2 = n.vel.x*n.vel.x + n.vel.y*n.vel.y + n.vel.z*n.vel.z;
@@ -1742,9 +2113,14 @@ class SoftBodyCar {
     const oCounts = ogrid.counts, oIdxA = ogrid.idx, ogx = ogrid.ocx, ogz = ogrid.ocz;
     for (let i=0;i<nodes.length;i++){
       const n = nodes[i];
-      const gh = ghS; world._groundHeightInto(n.pos.x, n.pos.z, this.sHint, gh, gh.normal, 40);
-      const pen = (gh.h + n.radius) - n.pos.y;
+      // height-only query first (see TrackWorld._groundHOnly): the
+      // full gradient query runs only for a node actually in the
+      // ground — identical height float either way, and the normal
+      // is consumed only inside the penetration branch below
+      const ghH = world._groundHOnly(n.pos.x, n.pos.z, this.sHint, 20);
+      const pen = (ghH + n.radius) - n.pos.y;
       if (pen > 0){
+        const gh = ghS; world._groundHeightInto(n.pos.x, n.pos.z, this.sHint, gh, gh.normal, 20);
         const nn = gh.normal;
         if (nn.y > 0.35){ n.pos.y += pen; }
         else { n.pos.x += nn.x*pen; n.pos.z += nn.z*pen; n.pos.y += nn.y*pen; }
@@ -1767,7 +2143,7 @@ class SoftBodyCar {
           const ci = gz*41 + gx;
           for (let oi2 = oCounts[ci]; oi2 < oCounts[ci+1]; oi2++){
             const o = obstacles[oIdxA[oi2]];
-          if (n.pos.y > gh.h + o.h + n.radius) continue;
+          if (n.pos.y > ghH + o.h + n.radius) continue;
           const dx = n.pos.x-o.x, dz = n.pos.z-o.z;
           const rr = o.r + n.radius, d2 = dx*dx+dz*dz;
           if (d2 >= rr*rr || d2 < 1e-9) continue;
@@ -1981,6 +2357,7 @@ if (typeof globalThis !== 'undefined'){
     RES_TARGET_DEFAULT:RES_TARGET_DEFAULT, resNameFor:resNameFor, profileAt:profileAt,
     chooseGrid:chooseGrid, ringPoints:ringPoints, carRes:carRes, BARRIER_LAT:BARRIER_LAT,
     MATERIALS:MATERIALS, zoneFor:zoneFor, TIRE_AMBIENT:TIRE_AMBIENT, tireGripFactor:tireGripFactor,
+    beamAxialForce:beamAxialForce, dampAlpha:dampAlpha, dampFilterStep:dampFilterStep, DAMP_CUTOFF_HZ:DAMP_CUTOFF_HZ, supportOpt:supportOpt,
     buildSkinAnchors:buildSkinAnchors, skinPositions:skinPositions, triBasis:triBasis, patchFrame:patchFrame };
 }
 // === SIM CORE END ===
