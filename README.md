@@ -5,6 +5,70 @@
 An endless, randomly generating road with smooth, blended turns — and cars
 built the way BeamNG builds them: out of **nodes and beams**.
 
+## What changed in v2.5
+
+Two reports from driving v2.4: at high beam resolutions the shell
+**sagged and draped** — a visible W-dip across the roof's front edge
+and a crease down the trunk — "the elasticity didn't go through";
+and the game was **a lot laggier** than v2.3.
+
+The sag was measured before it was fixed (parked on the real track,
+every node's height compared against the car's own frame): at 820
+nodes the muscle car's roof-front ring dipped ~140 mm corner-to-centre
+and its end rings ~200 mm, while the same car at 150 nodes sat within
+a few mm. Three causes, all in the ring structure:
+
+- **The ring chords changed geometry with resolution.** The chords
+  that triangulate each ring stepped a fixed 2 nodes. At 10 nodes per
+  ring that chord lands on the upper *side* nodes — a steep diagonal
+  that holds the roof centre up. At 18 nodes per ring it lands on the
+  flat top edge itself, leaving the centre held only by horizontal
+  beams, which have no first-order stiffness against a vertical load.
+  The chord step now scales with the ring size (⅓ of the ring), so a
+  chord lands at the same physical place at every resolution, and
+  fine grids keep the local step-2 chords as a second family, so
+  concentrated loads (the strut-mount links land on the floor
+  corners) average out across the ring instead of dragging single
+  nodes by ~40 mm.
+- **Ring beams had no series compensation.** Longitudinal beams get
+  stiffer per-beam as sections multiply (they are series chains);
+  ring beams got nothing, so each ring — a thinner slice of the
+  shell at fine grids — was the softest path in the cage. Ring beams
+  now carry a matching factor (√ of the section-count ratio, capped).
+- **The end rings are free ends.** First and last rings have
+  neighbours on one side only; their top centres sagged even at 150
+  nodes (the coupe's trunk ring: 43 mm). They now get bulkhead
+  chords from the top-centre node down to the floor quarters.
+
+A new test (36) locks the parked shape in: within every ring of every
+car at 150/500/820/1000 nodes, the top row must sit level to 30 mm,
+and the rendered roof front row of the 820-node muscle car to 40 mm.
+Measured on this build: worst ring in the whole matrix is the coupe
+at 820 nodes, **21 mm**; most cars sit at 1–13 mm; the skin roof row
+measures **1 mm** (v2.4: ~110 mm). The v2.4 crash behaviour is
+unchanged where it matters — same test thresholds, all passing:
+100 km/h integrity 85%, zero broken frame/cabin beams, 50 km/h
+frame/cabin deformation 0/0.
+
+The lag had two sources. Beam evaluations per frame while driving an
+820-node car were 130k (v2.4's extra bracing plus a 3× beam
+subcycle past 500 nodes). The subcycle is now sized from the built
+cage instead of the node target: 2 for almost every car, raised to
+3 only when the cage's stiffest nodal frequency (√(summed beam
+rate ÷ node mass), worst node) says 2 runs too close to the
+integration edge — in the current fleet only the 1000-node SUV
+(lightest roof nodes) needs 3. And the rendered skin no longer
+subdivides past 3× (9× base facets): at 820 nodes it was building
+25× facets and recomputing every vertex normal every frame, for a
+cage the skin already follows exactly through its cell anchors.
+Result: beam evaluations per driving frame at 820 nodes
+**130k → 100k (−24%)**, and the suite's driving perf guard measures
+6,648 ms per 10 physics-seconds at 1000 nodes (was ~6,890 ms at
+v2.4's beam count, now with ~15% more beams). One honest trade: at
+500 nodes the extra chord family costs ~10% of driving-loop time
+(~3,150 ms vs ~2,830 ms per 10 s, still inside the test ceiling) —
+that is where the 500-node sag went (worst car 54 mm → 6 mm).
+
 ## What changed in v2.4
 
 Two reports drove this release: the soft-body cars **folded instead of
@@ -136,11 +200,11 @@ Each car has its **own resolution setting: a target node count**. The grid
 generator picks the section/ring layout that lands the total node count
 ( grid + bumpers + mounts + wheels ) on the target.
 
-- **NORMAL — 150 nodes** (about 690 beams)
-- **HIGH — 250 nodes** (about 1,570 beams)
-- **ULTRA — 500 nodes** (about 3,230 beams)
+- **NORMAL — 150 nodes** (about 716 beams)
+- **HIGH — 250 nodes** (about 1,626 beams)
+- **ULTRA — 500 nodes** (about 3,724 beams)
 - **ULTRA+ — past 500**, `]` keeps adding **+10 nodes** per press, up to
-  **1000 nodes** (about 6,660 beams)
+  **1000 nodes** (about 7,640 beams)
 
 `[` steps back down symmetrically (above 500 in −10 steps, then
 500 → 250 → 150). Changing the setting respawns the current car fresh at
@@ -153,21 +217,28 @@ compact per-car list.
 The **body scales with the setting**: there is one master body per car,
 and its triangle density follows the node target — each body quad is
 subdivided from 1×1 at 150 nodes (the floor: exactly the original body's
-density, so the car never turns into a blob) up to 6×6 at 1000 nodes.
-Body vertices are skinned to the cage **cell** they belong to (section
-pair × ring segment), with their offset re-applied through the cell's own
-deformed frame — so in a crash the panels move with their own piece of
-cage instead of blending across the car, and the body stays matched to
-the nodes (the test suite measures body-vs-cage mismatch after a
-100 km/h crash; the cell skinning roughly halves it versus the old
-3-nearest-nodes blend). Triangle counts per car run from
-348–408 at 150 nodes to 12,528–14,688 at 1000.
+density, so the car never turns into a blob) up to 3×3 in the built mesh.
+(The bucket builder itself scales to 6×6 — the test suite locks that
+range — but since v2.5 the game caps the built mesh at 3×: past that the
+extra facets cost real frame time in per-frame normal recomputation and
+buy nothing the eye can see, because the skin follows the cage through
+its cell anchors either way.) Body vertices are skinned to the cage
+**cell** they belong to (section pair × ring segment), with their offset
+re-applied through the cell's own deformed frame — so in a crash the
+panels move with their own piece of cage instead of blending across the
+car, and the body stays matched to the nodes (the test suite measures
+body-vs-cage mismatch after a 100 km/h crash; the cell skinning roughly
+halves it versus the old 3-nearest-nodes blend). Triangle counts per car
+run from 348–408 at 150 nodes to 3,132–3,672 at the 3× cap.
 
 Under the hood, finer cages need softer per-beam rates to stay stable at
-480 Hz; beam forces are therefore subcycled (evaluated twice per step,
-three times past 500 nodes) so the structure can stay stiff without
-ringing, and the parallel chord families keep the shell from sagging
-under its own weight at fine resolutions. Each strut mount is also
+480 Hz; beam forces are therefore subcycled — twice per step at every
+target above Normal, and three times for a cage whose stiffest nodal
+frequency (measured at build time from the actual beams and node
+masses) runs too close to the integration edge at two; in the current
+fleet only the 1000-node SUV needs the third cycle — so the structure
+can stay stiff without ringing, and the parallel chord families keep
+the shell from sagging under its own weight at fine resolutions. Each strut mount is also
 braced across the car to the opposite side's low anchors: the mount's
 own web runs fore/aft and barely locates it sideways, while the
 compressed strut tries to topple it inward — at fine resolutions that
@@ -249,14 +320,14 @@ js/sim/core.js      physics core: track, beams, materials, tires, cars, skinning
 js/render/car.js    car geometry, skinned mesh, B debug overlay
 js/render/world.js  procedural textures, terrain/road/barrier chunks
 js/game.js          input, cameras, title screen, HUD, main loop
-test_sim.js         35 headless physics tests (node test_sim.js)
+test_sim.js         36 headless physics tests (node test_sim.js)
 ```
 
 The soft-body simulation (nodes,
 beams, plastic deformation, breakage, terrain and cliff physics) runs at
 480 Hz in substeps, in plain JavaScript with no dependencies; rendering by
 Three.js. The physics core is shared verbatim with a Node test suite
-(`node test_sim.js`, 35 tests) that verifies rest stability and node/beam
+(`node test_sim.js`, 36 tests) that verifies rest stability and node/beam
 counts at every preset for all five cars, the 100 km/h head-on crash
 sequence at 150/250/500/620 nodes, beam thresholds, cliff falls and
 unclimbability, road blending, determinism (including barriers and
@@ -287,8 +358,13 @@ pristine, crumple zone spent), per-car suspension bounce (second bounce
 braking gap, beam sleep (a settled parked car evaluates **zero** beams
 and drifts 0 mm until input, an impact or a shove wakes it), a driving
 performance ceiling, and the body-vs-cage skinning mismatch bound.
+A further test locks the v2.5 parked shape: within every ring of every
+car at 150/500/820/1000 nodes the top row must sit level to 30 mm in
+the car's own frame, and the rendered roof front row of the 820-node
+muscle car to 40 mm (this build measures a 21 mm worst ring and a
+1 mm roof row).
 Performance, measured headlessly in Node: simulating 10 physics-seconds
-of driving takes ≈2.8 s for a 500-node car and ≈6.9 s for a 1000-node
+of driving takes ≈3.1 s for a 500-node car and ≈6.6 s for a 1000-node
 car — faster than real time; and a settled parked car costs essentially
 nothing at all, because the simulation sleeps instead of staying loaded.
 The 1000-node tier is the extreme
@@ -296,9 +372,9 @@ opt-in and is the first thing to cost frame rate on weaker hardware.
 
 Ride height, stated plainly: the strut-perch collapse described above is
 fixed and test-locked. Measured parked clearance (lowest chassis node,
-wheels excluded) is 0.11–0.30 m for every car at every setting from 150
+wheels excluded) is 0.14–0.31 m for every car at every setting from 150
 to 1000 nodes, with zero ground contact anywhere; the tightest case is
-the SUV at 500 nodes (0.11 m). Driven top speed at 1000 nodes now matches
+the SUV at 500 nodes (0.14 m). Driven top speed at 1000 nodes now matches
 500 nodes for all five cars. What remains is ordinary suspension: a
 parked car settles 30–60 mm onto its springs, because that is what the
 springs are for. The 1000-node tier's only real cost is performance, as
