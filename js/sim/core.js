@@ -633,6 +633,32 @@ class SoftBodyCar {
     // direct node refs per beam: the hot loops (beam forces, beam
     // limits) index through these instead of nodes[b.a] / nodes[b.b]
     for (const b of this.beams){ b.nA = this.nodes[b.a]; b.nB = this.nodes[b.b]; }
+    // beam subcycle count for this cage (used in substep). v2.5: the
+    // schedule is 2 at every target above Normal — v2.4 ran 3 past 500
+    // nodes, which cost ~50% more beam evaluations than 2 for margin
+    // the fleet mostly does not need — raised back to 3 only when the
+    // built cage's stiffest NODAL frequency says 2 runs too close to
+    // the explicit-integration edge. The nodal frequency of a node is
+    // sqrt(sum of its beams' rates / its mass); the guard trips at
+    // omega*h/sub > 1.9 (h = 1/480). Measured on the fleet: every
+    // cell that is stable at 2 sits at <= ~1.77, and the one cell
+    // that shook itself apart parked at 2 (the SUV at 1000 nodes —
+    // the lightest roof nodes in the fleet) measures 2.03. Beam
+    // rates never change after the build, so the build-time value
+    // bounds the car's whole life (broken beams only remove
+    // stiffness).
+    {
+      const sumK = new Float64Array(this.nodes.length);
+      for (const b of this.beams){ sumK[b.a] += b.k; sumK[b.b] += b.k; }
+      let wMax = 0;
+      for (let i=0;i<this.nodes.length;i++){
+        const w = Math.sqrt(sumK[i]/this.nodes[i].mass);
+        if (w > wMax) wMax = w;
+      }
+      let n2 = this.targetNodes > RES_TARGET_DEFAULT ? 2 : 1;
+      while (n2 < 3 && wMax*(1/480)/n2 > 1.9) n2++;
+      this.sub2N = n2;
+    }
     this.steerAngle = 0; this.sHint = 100; this.distance = 0;
     this.obstacleHits = 0; this.hitCooldown = 0; this.groundHits = 0; this.groundHitCooldown = 0;
     this.flexRamp = 0; // flex-damping fade-in state (see dampFlex)
@@ -827,15 +853,54 @@ class SoftBodyCar {
         breakStrain:matB * (0.94 + 0.12*hashN(a*31+b*17)),
         plasticScale:M.plastic, mat:zone }));
     };
-    // ring beams: around each section, plus skip-one chords. The chords
+    // ring beams: around each section, plus chords. The chords
     // triangulate the ring in its own plane: a bare polygon of edge beams
     // keeps every beam length yet folds at its joints (a mechanism, not a
     // structure), and X-braced panels cannot stop every ring folding the
     // same way at once. With chords, each ring is a chain of rigid
     // triangles and the cross-section holds its shape.
+    // v2.5 chord geometry: the chord STEP scales with the ring size —
+    // a chord spans ~1/3 of the ring at every resolution, not a fixed
+    // 2 nodes. The fixed step was resolution-inconsistent in disguise:
+    // at P=10 the step-2 chord from the top-centre node lands on the
+    // upper SIDE nodes (a steep diagonal with real vertical support),
+    // but at P=18 it lands on the flat top edge itself, so the roof's
+    // centre node was held only by horizontal beams — a catenary with
+    // no first-order stiffness — and draped ~0.20 m between the corners
+    // parked (measured; the visible W-dip across the roof and the crease
+    // down the trunk). With the step at round(P/3) the chord lands at
+    // the same physical place at every P. Fine grids (P >= 14, or
+    // S >= 40 sections) ALSO keep the local step-2 family: the long
+    // chords alone tie the top centre to the floor corners, which are
+    // exactly the nodes the strut-mount links load, and the centre
+    // inherited their ~40 mm load-entry pop; with both families the
+    // pops average out across the ring instead of dragging one node.
+    // Ring beams also get a series-compensation factor like the
+    // longitudinal beams' kLng (ringK, sqrt of the section-count
+    // ratio, capped): each ring is a thinner slice of the shell as S
+    // grows, and the un-compensated ring was the softest path in the
+    // cage at fine grids. The cap and the sqrt keep the stiffest car
+    // inside the integration budget the beam subcycle buys (the
+    // subcycle count itself is set from the built cage — see the
+    // constructor).
+    const chordStep = Math.max(2, Math.round(P/3));
+    const ringK = Math.min(2.2, Math.sqrt(Math.max(1, (S-1)/13)));
     for (let i=0;i<S;i++) for (let j=0;j<P;j++){
-      addBeam(this.secRings[i][j], this.secRings[i][(j+1)%P]);
-      addBeam(this.secRings[i][j], this.secRings[i][(j+2)%P]);
+      addBeam(this.secRings[i][j], this.secRings[i][(j+1)%P], ringK);
+      addBeam(this.secRings[i][j], this.secRings[i][(j+chordStep)%P], ringK);
+      if ((P >= 14 || S >= 40) && chordStep > 2)
+        addBeam(this.secRings[i][j], this.secRings[i][(j+2)%P], ringK);
+    }
+    // bulkhead chords on the two end rings: an end ring has neighbours
+    // on one side only, so its top edge is the free end of every
+    // longitudinal line and its centre node sags even at Normal (the
+    // coupe's trunk ring measured 43 mm at 150 nodes). One long chord
+    // per side from the top-centre node down to the floor quarters
+    // braces the end ring in its own plane, like a bulkhead panel.
+    const endStep = Math.max(3, Math.round(P*0.4));
+    for (const i of [0, S-1]) for (const sgn of [-1,1]){
+      const cTop = this.secRings[i][Math.floor(P/2)];
+      addBeam(cTop, this.secRings[i][(Math.floor(P/2) + sgn*endStep + P)%P], ringK);
     }
     // longitudinal beams: matching ring nodes, section to section
     for (let i=0;i<S-1;i++) for (let j=0;j<P;j++)
@@ -1440,9 +1505,10 @@ class SoftBodyCar {
     // The beam forces are added separately, inside the integration loop:
     // at high node counts the cage's stiffest nodal modes sit close to
     // the 480 Hz explicit-integration edge, so the beams are subcycled —
-    // evaluated and integrated twice per substep — which buys a real
-    // stability margin without changing the step the world, tyres and
-    // contacts see, and without softening the structure.
+    // evaluated and integrated sub2N times per substep (this.sub2N, set
+    // at build time from the cage's stiffest nodal frequency) — which
+    // buys a real stability margin without changing the step the world,
+    // tyres and contacts see, and without softening the structure.
     // force buffer reused across substeps (was a fresh array of fresh
     // objects every substep — the single biggest allocation source in
     // the hot loop)
@@ -1450,7 +1516,7 @@ class SoftBodyCar {
       this._F = nodes.map(n=>({ x:0, y:-9.81*n.mass, z:0 }));
     const F = this._F;
     for (let i=0;i<nodes.length;i++){ const Fi = F[i]; Fi.x = 0; Fi.y = -9.81*nodes[i].mass; Fi.z = 0; }
-    const sub2N = this.targetNodes > 500 ? 3 : (this.targetNodes > RES_TARGET_DEFAULT ? 2 : 1);
+    const sub2N = this.sub2N || 1;
     if (!this._Fs || this._Fs.length !== nodes.length)
       this._Fs = nodes.map(()=>({ x:0, y:0, z:0 }));
     const addBeamForces = (Ft, doDeform)=>{
