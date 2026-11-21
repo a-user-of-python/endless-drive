@@ -90,7 +90,7 @@ test('1 rest stability (12 s parked, sedan @150)', () => {
   return 'maxSpeed ' + ms.toFixed(3) + ' m/s, drift ' + drift.toFixed(2) + ' m, n' + car.nodes.length + '/b' + car.beams.length;
 });
 
-/* 2 — head-on crash at 100 km/h (Sean's scenario) */
+/* 2 — head-on crash at 100 km/h (the headline scenario) */
 test('2 head-on crash 100 km/h (sedan @150)', () => {
   const { world, car } = crashSetup('sedan', 27.78);
   return runCrash(car, world);
@@ -812,7 +812,7 @@ test('27 zone materials: ordering, 50 km/h frame/cabin integrity, 100 km/h absor
    one clear compression and at most a small second bounce — the
    second compression depth <= 40% of the first, settled by 3 s.
    (Pre-damper build, measured with this procedure: the re-compression
-   ran ~52% of the release — the bounce Sean reported.) */
+   ran ~52% of the release — the reported bounce.) */
 test('28 suspension dampers: per-car values, drop bounce killed', () => {
   for (const def of CAR_DEFS) {
     assert(typeof def.suspK === 'number' && def.suspK > 0, def.id + ' has no suspK');
@@ -1069,6 +1069,211 @@ test('32 skin match: cell skinning follows the cage through a 100 km/h crash', (
   assert(p98New <= 0.42, 'cell skinning p98 mismatch ' + p98New.toFixed(3) + ' m > 0.42 m bound');
   assert(p98Old > 0.42, 'old skinning p98 mismatch ' + p98Old.toFixed(3) + ' m — the bound no longer discriminates');
   return 'p98 vertex-to-cage mismatch after the crash: new ' + p98New.toFixed(3) + ' m vs old ' + p98Old.toFixed(3) + ' m';
+});
+
+/* 33 — fold test (v2.4, issue #1 "they kind of just fold on
+   themselves"): in a 50 km/h head-on the front sections must CRUSH
+   (shorten front-to-back), not FOLD (translate sideways/down) and
+   the cabin must not telescope. Method: Kabsch rigid fit over the
+   cabin sections' nodes (|zf| <= 0.21) gives the wreck's reference
+   frame; every section centroid's displacement is decomposed in
+   that frame. Thresholds, from the physics of a straight head-on:
+   - lateral: there is no sideways load in a head-on, so sideways
+     section motion is pure fold — bound 0.10 m (v2.4 measures
+     ~0.00-0.03 m).
+   - vertical: a wreck settles on its destroyed front suspension,
+     so some nose droop is honest — bound 0.45 m per section
+     (v2.4 measures 0.42 m; the pre-fix build's sections went to
+     0.46-0.67 m while ALSO telescoping the cabin).
+   - cabin intrusion: gaps inside the cabin band (|zm| <= 0.15)
+     must not shorten — bound 0.12 m. This is the sharp edge: the
+     pre-fix build shortened the firewall gap by 0.53 m at 50 km/h
+     (the "frame does not exist" complaint, measured), v2.4 by
+     ~0.04 m.
+   - cabin fit RMS <= 0.15 m: the reference itself must stay rigid
+     (pre-fix 0.46 m, v2.4 ~0.07 m). */
+function svd3(H) {
+  const A = H.map(r => r.slice());
+  const V = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  for (let sweep = 0; sweep < 30; sweep++) {
+    let off = 0;
+    for (const [p, q] of [[0, 1], [0, 2], [1, 2]]) {
+      const app = A[0][p] * A[0][p] + A[1][p] * A[1][p] + A[2][p] * A[2][p];
+      const aqq = A[0][q] * A[0][q] + A[1][q] * A[1][q] + A[2][q] * A[2][q];
+      const apq = A[0][p] * A[0][q] + A[1][p] * A[1][q] + A[2][p] * A[2][q];
+      off += apq * apq;
+      if (Math.abs(apq) < 1e-14 * Math.sqrt(app * aqq + 1e-300)) continue;
+      const tau = (aqq - app) / (2 * apq);
+      const t = Math.sign(tau) / (Math.abs(tau) + Math.sqrt(1 + tau * tau));
+      const c = 1 / Math.sqrt(1 + t * t), s = t * c;
+      for (let r = 0; r < 3; r++) {
+        const arp = A[r][p], arq = A[r][q];
+        A[r][p] = c * arp - s * arq; A[r][q] = s * arp + c * arq;
+        const vrp = V[r][p], vrq = V[r][q];
+        V[r][p] = c * vrp - s * vrq; V[r][q] = s * vrp + c * vrq;
+      }
+    }
+    if (off < 1e-24) break;
+  }
+  const sig = [0, 1, 2].map(j => Math.hypot(A[0][j], A[1][j], A[2][j]));
+  const U = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (let j = 0; j < 3; j++) for (let r = 0; r < 3; r++) U[r][j] = sig[j] > 1e-12 ? A[r][j] / sig[j] : (r === j ? 1 : 0);
+  return { U, V };
+}
+function kabschFit(P, Q) {
+  const n = P.length;
+  const pc = [0, 0, 0], qc = [0, 0, 0];
+  for (let i = 0; i < n; i++) for (let k = 0; k < 3; k++) { pc[k] += P[i][k]; qc[k] += Q[i][k]; }
+  for (let k = 0; k < 3; k++) { pc[k] /= n; qc[k] /= n; }
+  const H = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (let i = 0; i < n; i++) {
+    const p = [P[i][0] - pc[0], P[i][1] - pc[1], P[i][2] - pc[2]];
+    const q = [Q[i][0] - qc[0], Q[i][1] - qc[1], Q[i][2] - qc[2]];
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) H[r][c] += p[r] * q[c];
+  }
+  const { U, V } = svd3(H);
+  const M = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) { let s = 0; for (let k = 0; k < 3; k++) s += V[r][k] * U[c][k]; M[r][c] = s; }
+  const dm = M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1]) - M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0]) + M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0]);
+  const D = [1, 1, dm < 0 ? -1 : 1];
+  const R = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) { let s = 0; for (let k = 0; k < 3; k++) s += V[r][k] * D[k] * U[c][k]; R[r][c] = s; }
+  return { R, pc, qc };
+}
+function sectionDecomp(car) {
+  const S = car.gridS, zf = car.secZ;
+  const cabIds = [];
+  for (let i = 0; i < S; i++) if (Math.abs(zf[i]) <= 0.21) for (const id of car.secRings[i]) cabIds.push(id);
+  const P = cabIds.map(id => { const r = car.nodes[id].rest; return [r.x, r.y, r.z]; });
+  const Q = cabIds.map(id => { const p = car.nodes[id].pos; return [p.x, p.y, p.z]; });
+  const { R, pc, qc } = kabschFit(P, Q);
+  let res = 0;
+  for (let i = 0; i < P.length; i++) {
+    const p = [P[i][0] - pc[0], P[i][1] - pc[1], P[i][2] - pc[2]];
+    const e = [0, 1, 2].map(r => qc[r] + R[r][0] * p[0] + R[r][1] * p[1] + R[r][2] * p[2]);
+    res += (e[0] - Q[i][0]) ** 2 + (e[1] - Q[i][1]) ** 2 + (e[2] - Q[i][2]) ** 2;
+  }
+  const rms = Math.sqrt(res / P.length);
+  const axX = [R[0][0], R[1][0], R[2][0]], axY = [R[0][1], R[1][1], R[2][1]], axZ = [R[0][2], R[1][2], R[2][2]];
+  const cent = (ids, rest) => {
+    let x = 0, y = 0, z = 0;
+    for (const id of ids) { const p = rest ? car.nodes[id].rest : car.nodes[id].pos; x += p.x; y += p.y; z += p.z; }
+    const k = 1 / ids.length; return [x * k, y * k, z * k];
+  };
+  const rows = [];
+  let prevC = null;
+  for (let i = 0; i < S; i++) {
+    const cl = cent(car.secRings[i], true), cc = cent(car.secRings[i], false);
+    const p = [cl[0] - pc[0], cl[1] - pc[1], cl[2] - pc[2]];
+    const e = [0, 1, 2].map(r => qc[r] + R[r][0] * p[0] + R[r][1] * p[1] + R[r][2] * p[2]);
+    const d = [cc[0] - e[0], cc[1] - e[1], cc[2] - e[2]];
+    let gapShort = NaN;
+    if (prevC) {
+      const restGap = (zf[i - 1] - zf[i]) * car.def.length;
+      const cur = [prevC[0] - cc[0], prevC[1] - cc[1], prevC[2] - cc[2]];
+      gapShort = restGap - (cur[0] * axZ[0] + cur[1] * axZ[1] + cur[2] * axZ[2]);
+    }
+    rows.push({
+      zf: zf[i],
+      axial: d[0] * axZ[0] + d[1] * axZ[1] + d[2] * axZ[2],
+      lat: d[0] * axX[0] + d[1] * axX[1] + d[2] * axX[2],
+      up: d[0] * axY[0] + d[1] * axY[1] + d[2] * axY[2],
+      gapShort
+    });
+    prevC = cc;
+  }
+  return { rows, rms };
+}
+test('33 fold test: 50 km/h head-on crushes straight, cabin does not telescope (sedan @150)', () => {
+  const { world, car } = crashSetup('sedan', 13.89, 150);
+  for (let i = 0; i < 2500; i++) { car.step(0.002, NO_INPUT, world); if (i > 200 && car.speed() < 0.8) break; }
+  assert(!car.hasNaN(), 'NaN after 50 km/h crash');
+  const { rows, rms } = sectionDecomp(car);
+  assert(rms <= 0.15, 'cabin fit RMS ' + rms.toFixed(3) + ' m — the safety cell itself bent (pre-fix 0.46 m)');
+  let maxLat = 0, maxUp = 0, crush = 0, cabinIntrusion = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (r.zf > 0.1) {
+      maxLat = Math.max(maxLat, Math.abs(r.lat));
+      maxUp = Math.max(maxUp, Math.abs(r.up));
+      if (!isNaN(r.gapShort)) crush += Math.max(0, r.gapShort);
+    }
+    if (i > 0 && Math.abs((rows[i - 1].zf + r.zf) * 0.5) <= 0.15 && !isNaN(r.gapShort))
+      cabinIntrusion = Math.max(cabinIntrusion, r.gapShort);
+  }
+  assert(crush >= 0.8, 'front barely crushed: ' + crush.toFixed(2) + ' m of gap shortening');
+  assert(maxLat <= 0.10, 'front section folded sideways ' + maxLat.toFixed(3) + ' m (bound 0.10)');
+  assert(maxUp <= 0.45, 'front section folded vertically ' + maxUp.toFixed(3) + ' m (bound 0.45)');
+  assert(cabinIntrusion <= 0.12, 'cabin gap telescoped ' + cabinIntrusion.toFixed(3) + ' m (bound 0.12; pre-fix 0.53)');
+  return 'cabin RMS ' + rms.toFixed(3) + ' m, front crush ' + crush.toFixed(2) + ' m, max lateral ' +
+    maxLat.toFixed(3) + ' m, max vertical ' + maxUp.toFixed(3) + ' m, cabin intrusion ' + cabinIntrusion.toFixed(3) + ' m';
+});
+
+/* 34 — zone order at 100 km/h + the strict full-speed numbers
+   (v2.4): the sacrificial zones (bumper + crumple + panel) must
+   absorb the large majority of all beam damage, NO frame or cabin
+   beam may break, integrity must be back at >= 82% (v2.3 measured
+   77%) and the bumper-to-nose compression <= 1.32 m (v2.3 measured
+   1.35 m; v2.4 measures ~1.25 m). */
+test('34 zone order at 100 km/h: sacrificial zones absorb, frame/cabin never break (sedan @150)', () => {
+  const { world, car } = crashSetup('sedan', 27.78, 150);
+  const comp0 = distNodes(car, car.frontBumper, car.noseRefIdx);
+  for (let i = 0; i < 2500; i++) { car.step(0.002, NO_INPUT, world); if (i > 200 && car.speed() < 0.8) break; }
+  assert(!car.hasNaN(), 'NaN after 100 km/h crash');
+  const comp = comp0 - distNodes(car, car.frontBumper, car.noseRefIdx);
+  const dmg = {};
+  let total = 0, sacrificial = 0;
+  for (const b of car.beams) {
+    const e = dmg[b.mat] || (dmg[b.mat] = { def: 0, brk: 0 });
+    if (b.broken) { e.brk++; total++; } else if (b.deformed) { e.def++; total++; }
+    if (b.mat === 'bumper' || b.mat === 'crumple' || b.mat === 'panel') { if (b.broken || b.deformed) sacrificial++; }
+  }
+  const st = car.stats();
+  assert((dmg.frame || {}).brk === 0 && (dmg.cabin || {}).brk === 0,
+    'frame/cabin beams broke at 100 km/h: ' + JSON.stringify(dmg));
+  assert((dmg.crumple || {}).brk >= 10, 'crumple zone did not sacrifice itself: broken ' + (dmg.crumple || {}).brk);
+  assert(sacrificial / total >= 0.75,
+    'sacrificial zones absorbed only ' + Math.round(100 * sacrificial / total) + '% of damage (bound 75%): ' + JSON.stringify(dmg));
+  assert(st.integrity >= 82, 'integrity ' + st.integrity + '% < 82% (v2.3 was 77%)');
+  assert(comp <= 1.32, 'compression ' + comp.toFixed(2) + ' m > 1.32 m (v2.3 was 1.35 m)');
+  assert(comp >= 0.6, 'compression ' + comp.toFixed(2) + ' m < 0.6 m — front did not crush');
+  return 'integrity ' + st.integrity + '%, compression ' + comp.toFixed(2) + ' m, sacrificial share ' +
+    Math.round(100 * sacrificial / total) + '%, damage ' + JSON.stringify(dmg);
+});
+
+/* 35 — parked stability + sleep across the full matrix (v2.4):
+   all 5 cars x all 4 resolutions (150/250/500/1000) must settle
+   upright and undamaged, fall asleep, and then do ZERO further beam
+   evals with zero drift. This is the regression net for the v2.3
+   lesson — strength must never come back as parked shake (the
+   coupe at high k was the failure mode). Tests 13/19 cover settle
+   and clearance; this one adds the 1000-node row and the sleep
+   guarantee at every cell. */
+test('35 parked stability + sleep matrix (5 cars x 150/250/500/1000)', () => {
+  const infos = [];
+  for (const def of CAR_DEFS) {
+    const cells = [];
+    for (const target of [150, 250, 500, 1000]) {
+      const world = new TrackWorld(1337);
+      const car = spawnAt(def.id, world, 100, target);
+      let waited = 0;
+      while (!car.asleep && waited < 12) { car.step(1 / 60, NO_INPUT, world); waited += 1 / 60; }
+      assert(car.asleep, def.id + ' @' + target + ' never fell asleep parked');
+      assert(!car.hasNaN(), def.id + ' @' + target + ' NaN');
+      assert(car.stats().integrity === 100, def.id + ' @' + target + ' integrity ' + car.stats().integrity + ' parked (self-damage)');
+      assert(car.maxNodeSpeed() < 0.5, def.id + ' @' + target + ' not settled: ' + car.maxNodeSpeed().toFixed(3));
+      assert(car.frame().up.y > 0.9, def.id + ' @' + target + ' up.y ' + car.frame().up.y.toFixed(2));
+      const e0 = car.beamEvals;
+      const p0 = car.nodes[0].pos, x0 = p0.x, y0 = p0.y, z0 = p0.z;
+      stepFor(car, world, 3, NO_INPUT);
+      assert(car.beamEvals - e0 === 0, def.id + ' @' + target + ': ' + (car.beamEvals - e0) + ' beam evals while asleep');
+      const drift = Math.hypot(p0.x - x0, p0.y - y0, p0.z - z0);
+      assert(drift < 0.001, def.id + ' @' + target + ' drifted ' + (drift * 1000).toFixed(2) + ' mm while asleep');
+      cells.push('@' + target + ' ok');
+    }
+    infos.push(def.id + ' ' + cells.join(' '));
+  }
+  return infos.join('; ');
 });
 
 console.log(failures === 0 ? '\nALL TESTS PASS' : '\n' + failures + ' TEST(S) FAILED');
