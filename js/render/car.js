@@ -186,7 +186,16 @@ function buildCarMeshes(){
   skinParts = []; wheelMeshes = [];
   carGroup = new THREE.Group(); scene.add(carGroup);
   makeMats(carDef);
-  const buckets = buildBuckets(carDef, subdivForTarget(car.targetNodes));
+  // v2.5 render cap: the BUILT mesh never goes past subdivision 3,
+  // whatever the cage resolution. subdivForTarget itself still scales
+  // to 6 (the bucket builder's range, locked by the test suite), but
+  // at 820 nodes it asked for 5 — 25x the base facets — and updateSkin
+  // recomputes vertex normals over every one of those vertices every
+  // frame; that was a large slice of the v2.4 frame cost at high
+  // resolutions. At 3 the skin still renders at 9x base facets and
+  // follows the same fine cage through its cell anchors; only the
+  // facet size changes.
+  const buckets = buildBuckets(carDef, Math.min(3, subdivForTarget(car.targetNodes)));
   const nodes = car.nodes;
   for (const key of Object.keys(buckets)){
     const bk = buckets[key], n = bk.pos.length/3;
