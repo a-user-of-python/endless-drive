@@ -5,6 +5,151 @@
 An endless, randomly generating road with smooth, blended turns — and cars
 built the way BeamNG builds them: out of **nodes and beams**.
 
+## What changed in v2.6
+
+Three mechanics adapted from BeamNG.drive's documented JBeam model
+(researched from BeamNG's official documentation — the ideas and
+their roles are theirs; the numbers are ours, tuned for a 480 Hz
+core instead of BeamNG's 2,000 Hz, because their raw stiffness
+values assume that rate), plus a detail pass on the models.
+
+- **Support beams** (BeamNG's SUPPORT type): compression-only
+  slack limiters. A support exerts *no* force while it is longer
+  than 85% of its rest length and acts as a stiff spring-damper in
+  compression only below that — it can never pull in tension.
+  They guard the configurations a crash tries to reach: each
+  (thinned) ring gets top-centre → floor-quarter and bottom-centre
+  → roof-quarter limiters, and the cabin band gets longitudinal
+  roof → floor limiters. Because they are slack in every normal
+  configuration they add no parked stiffness (test 37: zero
+  supports engaged on a parked car; tests 35/36 unchanged). What
+  they change is the violent fold: dropped upside down onto its
+  roof from 1.2 m, the sedan's worst cabin top-row crush is
+  **48 mm with limiters vs 222 mm without** (test 38, which builds
+  the same car both ways). Counts after the optimisation pass
+  below thinned the supported-ring stride at mid/fine grids
+  (every ~16 sections instead of ~28): 36–122 supports per car
+  by resolution (sedan: 80 @150, 104 @500, 120 @1000) inside
+  totals of 796 / 3,828 / 7,755 beams.
+- **Band-limited damping** (BeamNG's `dampCutoffHz` idea): beam
+  damping force used to be the instantaneous relative velocity ×
+  rate — at 480 Hz on stiff beams that signal is mostly step-rate
+  noise. The damping force now passes through a per-beam
+  first-order low-pass (state in a typed array, cutoff 60 Hz,
+  dt-aware coefficient). Real damper motion (shell modes ~3 Hz,
+  wheel hop ~10–15 Hz) passes; step-rate jitter is attenuated to
+  ~37% (test 39). One deliberate exception: an **impact bypass** —
+  if the raw force jumps more than 2.5 kN in a step, the filter
+  snaps to it, because delaying genuine crash damping by even a
+  few steps measurably deepened the 100 km/h crush (1.38 m with a
+  pure filter vs 1.10 m with the bypass — the bypassed build is
+  also slightly better than v2.5's unfiltered 1.12–1.15 m). The
+  wobble test's flex RMS improved from 0.021 (v2.5) to ~0.003 m/s.
+  One scoping note from the optimisation pass: in the hot loop
+  the filter runs only on the high-damping beams (c ≥ 1,000
+  N·s/m — in this fleet exactly the four strut dampers, whose raw
+  force is the one large enough to carry the step-rate noise;
+  every other beam's c tops out near 600 and it takes its raw
+  damping force, with its filter state still written so it stays
+  coherent). The standalone force law (`beamAxialForce`, pinned
+  by test 39) is unscoped. Measured effect of the scoping: wobble
+  flex RMS 0.0031 → 0.0034 m/s, 100 km/h compression 1.10 →
+  1.12 m — both well inside their bands.
+- **Pressured struts** (BeamNG's PRESSURED beam idea, simplified):
+  this engine's wheels are single nodes — there are no hub/rim
+  radial beams — so the term went on the element that actually
+  carries the corner load, the strut: an extra outward force
+  ∝ pressure × (rest/current length − 1), capped so it can never
+  reach the 1/L singularity, and asymmetric (full force while
+  shortening, 35% while extending — a symmetric version returned
+  its energy into the suspension's second bounce: pickup drop
+  test 42% of first compression vs 33% asymmetric, 31% with no
+  pressure at all). The corner now stiffens progressively as it
+  compresses instead of staying a pure linear spring, and parked
+  strut compression eased from 0.928 to 0.937 of rest length
+  (test 41 pins the force law: 6× the pure-spring force at 80%
+  length, pressure component exactly at its cap at 50%).
+
+**Optimization, measured:** an ablation pass over the driving
+loop (beam forces ≈ 45% of the loop, ground queries ≈ 35%) found
+the cost was not where the first v2.6 build assumed, and the
+fixes are mostly exact — same floats, cheaper storage and fewer
+redundant evaluations:
+
+- **Height-only ground queries in the collision pass.** Every
+  node, every substep used to pay for a full ground query —
+  centre height plus two gradient taps (three terrain-height
+  evaluations, nine trig calls) plus surface and normal — but
+  the normal is only consumed when the node actually penetrates,
+  which is a handful of nodes per substep. The pass now asks for
+  the height alone (the identical float the full query's centre
+  tap computes) and runs the full query only for penetrating
+  nodes. This was the single biggest win (~700 ms of the @500
+  test-31 run). The ground scan window also narrowed 40 m →
+  20 m (the car's nodes are never more than ~15 m of along-track
+  from its centre), and `defectOffset` got an exact fast reject
+  (outside a defect bucket's s-window the offset is identically
+  zero).
+- **Flat storage for the hot loop.** The force buffers are now
+  flat `Float64Array`s refilled from a gravity template with one
+  typed-array copy per substep (they were arrays of per-node
+  objects), and every per-beam constant the force loop reads —
+  rates, damping, yield displacement, pressure, engagement
+  geometry, force-buffer offsets, node pos/vel references — is
+  copied once at build time into flat arrays, so
+  `addBeamForces` and `enforceBeamLimits` read array slots
+  instead of property chains. `beamEvals` accumulates in a local.
+- **Guarded plasticity bookkeeping.** `checkDeform` is a strict
+  no-op below the deform strain, so the loop only calls it when
+  the strain it already measured passes that threshold (the
+  break threshold is higher still for every material) — most
+  beams, most substeps, skip the call.
+- **Thinned supports and scoped damping filter** (see the two
+  sections above): supports at 500/1000 nodes dropped 160 → 104
+  and 176 → 120 per sedan, and the damping filter's per-beam
+  load/blend/store now runs only on the struts.
+
+On the render side, `computeVertexNormals` (per mesh, per frame)
+is replaced by a hand-rolled flat-normal pass into the existing
+normal attribute — for this non-indexed geometry the face normal
+*is* the vertex normal, so the parked picture is identical, with
+no per-frame allocation — and the skin meshes no longer recompose
+their (identity) matrices.
+
+**Final perf, test-31 procedure standalone, medians of 3 reps,
+both trees measured back-to-back in one session on this shared
+box:** at 500 nodes **v2.6 2,472 ms vs v2.5 2,872 ms** per 10
+physics-seconds (−14%); at 1000 nodes **v2.6 5,038 ms vs v2.5
+6,017 ms** (−16%). The full suite passes **41/41**, with test 31
+in-suite at 2,455 ms @500 (ceiling 3,200) and 5,317 ms @1000
+(ceiling 7,200) — the earlier v2.6 build failed that guard
+in-suite at ~3,300 ms. Beam evaluations per driving frame at
+820 nodes: 101,264 (v2.5: 99,728; +1.5% — the remaining support
+beams, most of which early-out). The only physics that moved is
+the damping-filter scoping's: 100 km/h compression 1.10 →
+1.12 m, wobble flex RMS 0.0031 → 0.0034 m/s, test 34's
+sacrificial share 86% → 85% — all inside their bands, and the
+parked matrices (tests 35/36) and the roof-crush margin
+(test 38: −48 mm vs −222 mm) are byte-identical to before the
+pass. No test assertion was changed or weakened.
+
+**Model detail:** the bodies were still one flat prism per panel.
+Now: segmented hood and trunk (two angled panels each), windshield
+header + A-pillar trims + wiper line, front valance / splitter /
+fog lights, a full-width tail strip (new deep-red material) +
+rear valance / diffuser / plate / muffler, rocker trim, door shut
+lines and handles, roof antenna; per car — pickup bed rails and a
+rear-window header, SUV rear spoiler lip (roof rails kept), coupe
+ducktail lip, muscle centre-stripe pair over hood/roof/trunk.
+Wheels: 8 spokes instead of 5, a brake disc behind them, hub cap,
+slightly wider tire. Every added piece is ordinary bucket
+geometry, so it is skinned to the cage and crumples with the body
+(test 40 anchors every vertex). Skinned vertex totals at the
+master plan: sedan 1,044 → **1,980**, pickup 1,188 → **2,160**,
+coupe 1,224 → **2,196**, SUV 1,080 → **2,016**, muscle 1,188 →
+**2,340** (+79–97%); at the game's render subdivision that is
+17,820–21,060 vertices per car.
+
 ## What changed in v2.5
 
 Two reports from driving v2.4: at high beam resolutions the shell
