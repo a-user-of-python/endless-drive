@@ -275,23 +275,29 @@ function buildCarMeshes(){
     skinParts.push({ geo:geo, anchors:anchors, n:n });
   }
   // wheels: unit wheel scaled per car (v2.6: wider tire, 8 spokes,
-  // brake disc behind the spokes, hub + hub cap)
-  const tireG = new THREE.CylinderGeometry(1, 1, 0.84, 20); tireG.rotateZ(Math.PI/2);
-  const rimG = new THREE.CylinderGeometry(0.58, 0.58, 0.80, 14); rimG.rotateZ(Math.PI/2);
+  // brake disc behind the spokes, hub + hub cap). The tire is an OPEN
+  // tread band + ring sidewalls and the rim an open barrel: a closed
+  // tire cylinder's end caps hid the rim/spokes/disc entirely (the
+  // wheels read as solid black discs in the v2.6 spot-check).
+  const tireG = new THREE.CylinderGeometry(1, 1, 0.84, 20, 1, true); tireG.rotateZ(Math.PI/2);
+  const wallG = new THREE.RingGeometry(0.56, 1.0, 20); wallG.rotateY(Math.PI/2);
+  const rimG = new THREE.CylinderGeometry(0.58, 0.58, 0.78, 14, 1, true); rimG.rotateZ(Math.PI/2);
   const discG = new THREE.CylinderGeometry(0.40, 0.40, 0.30, 14); discG.rotateZ(Math.PI/2);
   const hubG = new THREE.CylinderGeometry(0.16, 0.16, 0.84, 10); hubG.rotateZ(Math.PI/2);
   const capG = new THREE.CylinderGeometry(0.11, 0.11, 0.88, 10); capG.rotateZ(Math.PI/2);
-  const tireM = new THREE.MeshPhongMaterial({ color:0x131416, shininess:8 });
-  const rimM = new THREE.MeshPhongMaterial({ color:0xb9bec6, shininess:90, specular:0x888888 });
+  const spokeG = new THREE.BoxGeometry(0.34, 0.52, 0.14); spokeG.translate(0, 0.33, 0);
+  const tireM = new THREE.MeshPhongMaterial({ color:0x131416, shininess:8, side:THREE.DoubleSide });
+  const rimM = new THREE.MeshPhongMaterial({ color:0xb9bec6, shininess:90, specular:0x888888, side:THREE.DoubleSide });
   const discM = new THREE.MeshPhongMaterial({ color:0x777777, shininess:35, specular:0x444444 });
   for (let w=0; w<4; w++){
     const g = new THREE.Group();
     g.add(new THREE.Mesh(tireG, tireM));
+    for (const wx of [-0.41, 0.41]){ const wall = new THREE.Mesh(wallG, tireM); wall.position.x = wx; g.add(wall); }
     g.add(new THREE.Mesh(discG, discM));
     g.add(new THREE.Mesh(rimG, rimM));
     for (let sIdx=0; sIdx<8; sIdx++){
-      const sp = new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.15, 0.30), rimM);
-      sp.rotation.x = sIdx*Math.PI/8; g.add(sp);
+      const sp = new THREE.Mesh(spokeG, rimM);
+      sp.rotation.x = sIdx*Math.PI/4; g.add(sp);
     }
     g.add(new THREE.Mesh(hubG, MATS.dark));
     g.add(new THREE.Mesh(capG, rimM));
