@@ -1276,5 +1276,101 @@ test('35 parked stability + sleep matrix (5 cars x 150/250/500/1000)', () => {
   return infos.join('; ');
 });
 
+/* 36 — parked shape (v2.5): the shell must HOLD its shape parked on
+   the real track at every resolution. Method (the main agent's
+   measurement that convicted v2.4): spawn at s=100 on TrackWorld(1337),
+   settle + 2 s parked; express every node in the car's own frame
+   (frame() basis, node-0 origin) and take dy = local up coordinate
+   minus rest up coordinate. Within EVERY ring, the top-row nodes
+   (rest.y at the ring's maximum) must agree to <= 30 mm. On v2.4 the
+   fine grids draped: muscle @820 measured 82 mm across the mid ring,
+   ~140 mm across the roof-front ring and ~200 mm at the end rings,
+   because the fixed step-2 ring chords land on the flat top edge at
+   P=18 (no vertical support — a catenary) instead of on the side
+   nodes as they do at P=10, and the ring beams had none of the
+   series compensation the longitudinal beams get. The skin-level
+   symptom is asserted too: the muscle @820 roof front row (built
+   with the game's own render subdivision) must sit level —
+   centre-vs-corner dy difference <= 40 mm (v2.4: ~110 mm). */
+test('36 parked shape: top-row dy spread <= 30 mm every ring (5 cars x 150/500/820/1000) + skin roof row', () => {
+  const SIM = globalThis.__SIM;
+  const infos = [];
+  for (const def of CAR_DEFS) {
+    const cells = [];
+    for (const target of [150, 500, 820, 1000]) {
+      const world = new TrackWorld(1337);
+      const car = spawnAt(def.id, world, 100, target);
+      stepFor(car, world, 2, NO_INPUT);
+      assert(!car.hasNaN(), def.id + ' @' + target + ' NaN');
+      const fr = car.frame();
+      const o = car.nodes[0].pos, orr = car.nodes[0].rest;
+      const dy = car.nodes.map(nd => {
+        const dx = nd.pos.x - o.x, dyy = nd.pos.y - o.y, dz = nd.pos.z - o.z;
+        return dx * fr.up.x + dyy * fr.up.y + dz * fr.up.z - (nd.rest.y - orr.y);
+      });
+      let worst = 0, worstSec = -1;
+      for (let i = 0; i < car.gridS; i++) {
+        const ids = car.secRings[i];
+        let maxY = -1e9;
+        for (const id of ids) maxY = Math.max(maxY, car.nodes[id].rest.y);
+        let lo = 1e9, hi = -1e9;
+        for (const id of ids) {
+          if (car.nodes[id].rest.y < maxY - 0.001) continue;
+          if (dy[id] < lo) lo = dy[id];
+          if (dy[id] > hi) hi = dy[id];
+        }
+        if (hi - lo > worst) { worst = hi - lo; worstSec = i; }
+      }
+      assert(worst <= 0.030,
+        def.id + ' @' + target + ': top-row dy spread ' + (worst * 1000).toFixed(1) +
+        ' mm at section ' + worstSec + ' (bound 30 mm — the v2.5 sag fix)');
+      cells.push('@' + target + ' ' + (worst * 1000).toFixed(0) + 'mm');
+    }
+    infos.push(def.id + ' ' + cells.join(' '));
+  }
+  // skin-level: muscle @820 roof front row, game render path
+  const b0 = carJs.indexOf('/* ---------- geometry bucket builder');
+  const b1 = carJs.indexOf('/* ---------- skinned car mesh');
+  assert(b0 >= 0 && b1 > b0, 'bucket region not found in js/render/car.js');
+  eval(carJs.slice(b0, b1) + '\n;globalThis.__BUCKETS36 = { subdivForTarget:subdivForTarget, buildBuckets:buildBuckets };');
+  const BK = globalThis.__BUCKETS36;
+  const def = CAR_DEFS.find(d => d.id === 'muscle');
+  const world = new TrackWorld(1337);
+  const car = spawnAt('muscle', world, 100, 820);
+  stepFor(car, world, 2, NO_INPUT);
+  const buckets = BK.buildBuckets(def, Math.min(3, BK.subdivForTarget(820)));
+  let verts = [];
+  for (const k of Object.keys(buckets)) verts = verts.concat(buckets[k].pos);
+  const anchors = SIM.buildSkinAnchors(car, verts);
+  const pos = SIM.skinPositions(car, anchors, new Float64Array(verts.length));
+  const fr = car.frame();
+  const o = car.nodes[0].pos, orr = car.nodes[0].rest, L = def.length;
+  let maxY = -1e9;
+  const band = [];
+  for (let v = 0; v < verts.length / 3; v++) {
+    const vz = verts[v * 3 + 2];
+    if (vz >= 0.27 * L && vz <= 0.33 * L) { band.push(v); if (verts[v * 3 + 1] > maxY) maxY = verts[v * 3 + 1]; }
+  }
+  const dyOf = v => {
+    const dx = pos[v * 3] - o.x, dyy = pos[v * 3 + 1] - o.y, dz = pos[v * 3 + 2] - o.z;
+    return dx * fr.up.x + dyy * fr.up.y + dz * fr.up.z - (verts[v * 3 + 1] - orr.y);
+  };
+  // centre = the inner pair of the roof front row, corner = the outer
+  // pair (at the game's render subdivision of 3 the row's x samples
+  // sit at ~±0.25 and ~±0.74)
+  let cSum = 0, cN = 0, kSum = 0, kN = 0;
+  for (const v of band) {
+    if (verts[v * 3 + 1] < maxY - 0.02) continue;
+    const x = verts[v * 3];
+    if (Math.abs(x) <= 0.30) { cSum += dyOf(v); cN++; }
+    else if (Math.abs(x) >= 0.55) { kSum += dyOf(v); kN++; }
+  }
+  assert(cN > 0 && kN > 0, 'skin roof-row probe found no centre/corner vertices');
+  const diff = Math.abs(kSum / kN - cSum / cN);
+  assert(diff <= 0.040,
+    'skin roof front row centre-vs-corner dy difference ' + (diff * 1000).toFixed(1) + ' mm (bound 40 mm; v2.4 ~110 mm)');
+  return infos.join('; ') + '; skin roof row diff ' + (diff * 1000).toFixed(0) + ' mm';
+});
+
 console.log(failures === 0 ? '\nALL TESTS PASS' : '\n' + failures + ' TEST(S) FAILED');
 process.exit(failures === 0 ? 0 : 1);
