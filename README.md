@@ -5,6 +5,44 @@
 An endless, randomly generating road with smooth, blended turns — and cars
 built the way BeamNG builds them: out of **nodes and beams**.
 
+## What changed in v2.4
+
+Two reports drove this release: the soft-body cars **folded instead of
+crushing** ("it's like the frame does not exist, and the materials are
+made of wet sponge"), and the scene **never rendered in Firefox**.
+
+**Real internal framing.** The cage used to be a single shell — the
+"frame" was only a material label on the low beams. It now has actual
+structure inside the shell: sill rails along both sides, floor
+cross-members at every section, roof bars closing the cabin cell, an
+upper load path along the shoulders of the overhangs, and a second
+stage of bumper rails landing on the second section. Every side quad
+also has **both** diagonals now: the old alternating single diagonal
+braces a quad against shear in only one direction, and measurement
+showed the sections rotating through the unbraced direction and
+telescoping into the cabin at the firewall. Materials were retuned to
+match — panels tear far less readily, crumple zones yield later and
+fold shorter, frame/cabin plastic travel is cut hard, and crumple
+strength is staged (softest at the tip, strongest at the cabin edge).
+
+Measured on the sedan by the test suite: at 50 km/h head-on the
+cabin's own deformation is ~0.07 m RMS (was 0.46 m) and the firewall
+gap shortens 0.03 m (was 0.53 m); at 100 km/h integrity is 85% (was
+77%) with **zero** broken frame or cabin beams. Three new tests lock
+this in: a fold test (the crush must run front-to-back, not sideways
+or into the cabin), a 100 km/h zone-order test, and a parked
+stability + sleep check for every car at every resolution.
+
+**Firefox / startup hardening.** The renderer now tries progressively
+plainer WebGL setups before giving up (browsers differ in which
+context options they accept, and the old single attempt failed
+silently), a failed three.js download falls back to a second CDN, a
+lost graphics context says so on screen, and any startup failure
+shows a plain-words message with the technical error instead of a
+blank page. Optional visuals degrade instead of killing the scene:
+chunk building and the blob shadow now fail soft, like the
+photo-texture upgrade already did.
+
 ## The beam system
 
 Every car is a structure of mass **nodes** held together by **beams**. A beam
@@ -51,8 +89,8 @@ strain, break strain and plastic travel:
   survival cell.
 
 Measured on the sedan: at 50 km/h head-on, the crumple zone deforms and
-breaks doing the absorbing while the frame takes 2 deformed / 0 broken
-beams and the cabin takes none at all. Every beam also tracks its live
+breaks doing the absorbing while the frame and cabin take no deformed
+or broken beams at all. Every beam also tracks its live
 **stress** (elastic strain relative to its material's yield), and the
 **B** skeleton view colours by it: green at rest, through yellow and
 orange, to red at and past yield — so you can watch a crash load the
@@ -84,9 +122,10 @@ evenly spaced cross-sections along the car, each a ring of nodes evenly
 spaced by arc length around a rounded-rectangle cross-section (hood, cabin
 and rear heights interpolated from the car's profile, the roof narrower
 than the floor like a real shell). Rings are triangulated with chords,
-adjacent sections are joined by longitudinal beams and alternating panel
-diagonals, and at higher resolutions extra "skip" chord families run two
-and three sections apart. On top of the grid sit two bumper nodes, four
+adjacent sections are joined by longitudinal beams and panel diagonals —
+both diagonals on the side quads since v2.4, plus the internal framing
+described above — and at higher resolutions extra "skip" chord families
+run two and three sections apart. On top of the grid sit two bumper nodes, four
 suspension mounts, and four wheel nodes with a strut and triangulated
 links each — no distance-based auto-connect anywhere; every beam is
 placed by the generator and can be counted.
@@ -97,11 +136,11 @@ Each car has its **own resolution setting: a target node count**. The grid
 generator picks the section/ring layout that lands the total node count
 ( grid + bumpers + mounts + wheels ) on the target.
 
-- **NORMAL — 150 nodes** (604 beams)
-- **HIGH — 250 nodes** (1,448 beams)
-- **ULTRA — 500 nodes** (2,934 beams)
+- **NORMAL — 150 nodes** (about 690 beams)
+- **HIGH — 250 nodes** (about 1,570 beams)
+- **ULTRA — 500 nodes** (about 3,230 beams)
 - **ULTRA+ — past 500**, `]` keeps adding **+10 nodes** per press, up to
-  **1000 nodes** (5,878 beams)
+  **1000 nodes** (about 6,660 beams)
 
 `[` steps back down symmetrically (above 500 in −10 steps, then
 500 → 250 → 150). Changing the setting respawns the current car fresh at
@@ -210,14 +249,14 @@ js/sim/core.js      physics core: track, beams, materials, tires, cars, skinning
 js/render/car.js    car geometry, skinned mesh, B debug overlay
 js/render/world.js  procedural textures, terrain/road/barrier chunks
 js/game.js          input, cameras, title screen, HUD, main loop
-test_sim.js         32 headless physics tests (node test_sim.js)
+test_sim.js         35 headless physics tests (node test_sim.js)
 ```
 
 The soft-body simulation (nodes,
 beams, plastic deformation, breakage, terrain and cliff physics) runs at
 480 Hz in substeps, in plain JavaScript with no dependencies; rendering by
 Three.js. The physics core is shared verbatim with a Node test suite
-(`node test_sim.js`, 32 tests) that verifies rest stability and node/beam
+(`node test_sim.js`, 35 tests) that verifies rest stability and node/beam
 counts at every preset for all five cars, the 100 km/h head-on crash
 sequence at 150/250/500/620 nodes, beam thresholds, cliff falls and
 unclimbability, road blending, determinism (including barriers and
@@ -234,8 +273,14 @@ a parked car), elastic hold-together (a bumper displaced half a metre with
 deformation disabled springs back to within a centimetre), the steering
 direction (a held steer input measurably rotates the car the way the key
 says), and wobble decay (after a 0.35 m drop, the shell's internal flex
-motion in the final second is down to ≈0.02 m/s RMS — roughly a fifth of
-what the undamped shell kept). Six further tests lock the v2.3 systems:
+motion in the final second is down to ≈0.001 m/s RMS). Three further
+tests lock the v2.4 structure: the fold test (a 50 km/h head-on must
+crush front-to-back — cabin deformation ≈0.07 m RMS, firewall intrusion
+0.03 m, sideways section motion under a centimetre), the 100 km/h
+zone-order test (sacrificial zones absorb ≥75% of all beam damage, no
+frame or cabin beam breaks, integrity ≥82%), and the parked matrix
+(every car at every resolution settles undamaged, falls asleep, and
+then evaluates zero beams). Six further tests lock the v2.3 systems:
 material ordering and the 50 km/h zone-damage pattern (frame and cabin
 pristine, crumple zone spent), per-car suspension bounce (second bounce
 ≤ 40% of the first, every car), tire heating and the warm-vs-cold
