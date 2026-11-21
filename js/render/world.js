@@ -378,12 +378,26 @@ function buildChunk(idx){
   return g;
 }
 const chunks = new Map();
+const failedChunks = new Set();
 function updateChunks(){
   if (!car) return;
   const cur = Math.floor(car.sHint/CHUNK);
   const need = new Set();
   for (let i = cur-1; i <= cur+3; i++) need.add(i);
-  for (const idx of need) if (!chunks.has(idx)){ const g = buildChunk(idx); chunks.set(idx, g); scene.add(g); }
+  for (const idx of need) if (!chunks.has(idx) && !failedChunks.has(idx)){
+    // a chunk that fails to build (e.g. a GPU feature the browser
+    // refuses) leaves a gap in the scenery — it must not throw every
+    // frame and blank the whole scene (v2.4 degrade rule). The
+    // failure is remembered so it is not retried every frame, and the
+    // first one is surfaced in the boot error box.
+    try { const g = buildChunk(idx); chunks.set(idx, g); scene.add(g); }
+    catch (e){
+      failedChunks.add(idx);
+      if (window.__edShowError) window.__edShowError(
+        'Part of the scenery failed to build, so some ground may be missing. ' +
+        'The car and road physics are unaffected. The technical error is below.', e);
+    }
+  }
   for (const [idx, g] of chunks){
     if (!need.has(idx)){
       scene.remove(g);
