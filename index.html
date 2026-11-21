@@ -69,9 +69,61 @@
     font-size:24px; font-weight:700; padding:13px 30px; border-radius:10px; cursor:pointer; }
   .bigBtn:hover { background:#2a80e8; }
   #pressEnter { font-size:28px; font-weight:800; color:#ffd94d; text-align:center; margin-top:10px; }
+  #fatalBox { position:fixed; left:50%; top:24px; transform:translateX(-50%); z-index:50;
+    max-width:760px; width:92%; background:rgba(46,10,10,.94); border:2px solid #e83a2e;
+    border-radius:12px; padding:18px 22px; color:#ffe9e6; }
+  #fatalBox .ft { font-size:24px; font-weight:800; margin-bottom:6px; }
+  #fatalBox .fm { font-size:18px; line-height:1.45; }
+  #fatalBox pre { font-size:14px; white-space:pre-wrap; word-break:break-word; color:#ffb4a8;
+    background:rgba(0,0,0,.35); border-radius:8px; padding:10px 12px; margin:10px 0; max-height:180px; overflow:auto; }
+  #fatalBox button { background:#e83a2e; color:#fff; border:none; font-size:17px; font-weight:700;
+    padding:8px 20px; border-radius:8px; cursor:pointer; }
 </style>
 </head>
 <body>
+<div id="fatalBox" class="hidden">
+  <div class="ft">Endless Drive hit a problem</div>
+  <div class="fm" id="fatalMsg"></div>
+  <pre id="fatalTech"></pre>
+  <button id="fatalDismiss">Dismiss</button>
+</div>
+<script>
+/* Boot error trap (v2.4): installed before any game script so a failure
+   anywhere in startup — the 3D library, WebGL, a script error — shows a
+   plain-words message with the technical error text instead of a silent
+   blank page. Only the FIRST error is shown; the box is dismissible and
+   showing it never throws. The renderer setup in js/render/car.js also
+   calls __edShowError directly when WebGL context creation fails. */
+(function(){
+  var shown = false;
+  window.__edShowError = function(plain, err){
+    if (shown) return;
+    shown = true;
+    try {
+      var box = document.getElementById('fatalBox');
+      document.getElementById('fatalMsg').textContent = plain;
+      document.getElementById('fatalTech').textContent =
+        (err && (err.stack || err.message)) ? String(err.stack || err.message) : String(err || '');
+      box.classList.remove('hidden');
+      document.getElementById('fatalDismiss').onclick = function(){ box.classList.add('hidden'); };
+    } catch (e) { /* the error box itself must never become the error */ }
+  };
+  window.addEventListener('error', function(ev){
+    window.__edShowError(
+      'Something went wrong while the game was starting or running. ' +
+      'The technical error is below — if the screen stays blank, try reloading, ' +
+      'enabling hardware acceleration in the browser, or updating the graphics driver.',
+      ev.error || ev.message || 'unknown error');
+  });
+  window.addEventListener('unhandledrejection', function(ev){
+    window.__edShowError(
+      'Something went wrong while the game was starting or running. ' +
+      'The technical error is below — if the screen stays blank, try reloading, ' +
+      'enabling hardware acceleration in the browser, or updating the graphics driver.',
+      ev.reason || 'unhandled promise rejection');
+  });
+})();
+</script>
 <div id="game"></div>
 
 <div id="hud" class="hidden">
@@ -131,6 +183,24 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+/* If the CDN copy of three.js did not arrive (offline, blocked, CDN
+   down), pull the same version from the fallback CDN before any game
+   script runs; if that also fails, say so on screen instead of leaving
+   a silent blank page. Runs during parsing, so document.write still
+   loads the fallback synchronously in order. */
+if (!window.THREE){
+  document.write('<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"><\/script>');
+}
+</script>
+<script>
+if (!window.THREE){
+  window.__edShowError(
+    'The three.js 3D library failed to load, so the game cannot start. ' +
+    'Check your internet connection and any script blocker, then reload the page.',
+    'window.THREE is undefined after both CDN attempts');
+}
+</script>
 <script src="js/sim/core.js"></script>
 <script src="js/render/car.js"></script>
 <script src="js/render/world.js"></script>
