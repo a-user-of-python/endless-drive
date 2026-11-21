@@ -1372,5 +1372,202 @@ test('36 parked shape: top-row dy spread <= 30 mm every ring (5 cars x 150/500/8
   return infos.join('; ') + '; skin roof row diff ' + (diff * 1000).toFixed(0) + ' mm';
 });
 
+/* 37 — support beams (v2.6, item A): the BeamNG SUPPORT law —
+   exactly zero force at/above the engagement length (rest x 0.85),
+   a strong compression-only force below it, and never any tension
+   in any state. Car level: a modest count exists and NOT ONE
+   support is engaged on a parked car (they must add no parked
+   stiffness — tests 35/36 bound the parked shape separately). */
+test('37 support beams: slack above engagement, strong compression-only below, none engaged parked', () => {
+  const SIM = globalThis.__SIM;
+  const b = new Beam(0, 1, 2, { k: 100000, c: 500, deformStrain: 50, breakStrain: 50, kind: 'support', engage: 0.85, mat: 'frame' });
+  assert(Math.abs(b.engageLen - 1.7) < 1e-12, 'engageLen = ' + b.engageLen + ', expected 1.7');
+  const arr = new Float64Array(1);
+  const alpha = SIM.dampAlpha(SIM.DAMP_CUTOFF_HZ, 1 / 480);
+  for (const L of [2.0, 1.85, 1.7]) {
+    arr[0] = 0;
+    const f = SIM.beamAxialForce(b, L, -5, alpha, arr, 0);
+    assert(f === 0, 'support exerted ' + f + ' N at L=' + L + ' (engagement 1.7) with closing velocity');
+  }
+  arr[0] = 0;
+  const pen = 1.7 - 1.36;
+  const fC = SIM.beamAxialForce(b, 1.36, 0, alpha, arr, 0);
+  assert(fC < 0 && Math.abs(fC - (-100000 * pen)) < 1,
+    'engaged support force ' + fC + ' N, expected pure spring ' + (-100000 * pen) + ' N');
+  for (let L = 1.69; L >= 1.0; L -= 0.05) {
+    for (const rel of [-20, -2, 2, 20]) {
+      arr[0] = 0;
+      const f = SIM.beamAxialForce(b, L, rel, alpha, arr, 0);
+      assert(f <= 0, 'support pulled in tension: ' + f + ' N at L=' + L.toFixed(2) + ' rel=' + rel);
+    }
+  }
+  const world = new TrackWorld(1337);
+  const car = spawnAt('sedan', world, 100, 150);
+  assert(car.supportCount > 40, 'only ' + car.supportCount + ' support beams built');
+  assert(car.supportCount < car.beams.length * 0.2,
+    'supports are ' + car.supportCount + ' of ' + car.beams.length + ' beams — not a modest set');
+  stepFor(car, world, 2, NO_INPUT);
+  let engaged = 0;
+  for (const bb of car.beams) if (bb.kind === 'support' && bb.length(car.nodes) < bb.engageLen) engaged++;
+  assert(engaged === 0, engaged + ' support beams engaged on a parked car (parked stiffness changed)');
+  return 'unit law exact (0 N above 1.7 m, ' + Math.round(fC) + ' N at 0.34 m penetration, never tension); ' +
+    car.supportCount + ' supports on the sedan @150, 0 engaged parked';
+});
+
+/* 38 — support limiters vs ring inversion (v2.6, item A): the
+   measurable scenario is the violent fold — the car dropped upside
+   down onto its roof from 1.2 m. Without limiters the cabin rings'
+   top row crushes ~0.22 m toward the floor (measured); with them
+   the top-centre -> floor-quarter diagonals engage at 85% and hold
+   it to ~0.05 m. (A purely positional ring squash was also tried:
+   the normal beams recover it elastically either way, so it does
+   not discriminate — the drop is the test.) */
+test('38 support limiters cut roof crush in an upside-down drop (on vs off)', () => {
+  const SIM = globalThis.__SIM;
+  const drop = useSupports => {
+    SIM.supportOpt.enabled = useSupports;
+    const world = new TrackWorld(1337);
+    const car = spawnAt('sedan', world, 100, 150);
+    SIM.supportOpt.enabled = true; // restore immediately — build is done
+    const p = world.trackPoint(100);
+    const fx = Math.sin(p.heading), fz = Math.cos(p.heading);
+    const fwd = { x: fx, y: 0, z: fz };
+    const up = { x: 0, y: -1, z: 0 };
+    const right = { x: up.y * fwd.z - up.z * fwd.y, y: up.z * fwd.x - up.x * fwd.z, z: up.x * fwd.y - up.y * fwd.x };
+    car.setPoseFrame(p.x, p.y + 1.2, p.z, right, up, fwd, 0, 0, 0);
+    stepFor(car, world, 5, NO_INPUT);
+    assert(!car.hasNaN(), 'NaN in roof drop (supports=' + useSupports + ')');
+    const fr = car.frame();
+    const o = car.nodes[0].pos, orr = car.nodes[0].rest;
+    let worst = 0;
+    for (let i = 0; i < car.gridS; i++) {
+      if (Math.abs(car.secZ[i]) > 0.34) continue;
+      const ids = car.secRings[i];
+      let maxY = -1e9;
+      for (const id of ids) maxY = Math.max(maxY, car.nodes[id].rest.y);
+      for (const id of ids) {
+        if (car.nodes[id].rest.y < maxY - 0.001) continue;
+        const nd = car.nodes[id];
+        const dx = nd.pos.x - o.x, dyy = nd.pos.y - o.y, dz = nd.pos.z - o.z;
+        const dy = dx * fr.up.x + dyy * fr.up.y + dz * fr.up.z - (nd.rest.y - orr.y);
+        if (dy < worst) worst = dy;
+      }
+    }
+    return worst;
+  };
+  const on = drop(true), off = drop(false);
+  assert(off <= -0.15, 'without supports the roof only crushed ' + (off * 1000).toFixed(0) + ' mm — the scenario no longer discriminates');
+  assert(on >= -0.12, 'with supports the roof crushed ' + (on * 1000).toFixed(0) + ' mm (bound -120 mm)');
+  assert(on > off * 0.5, 'supports cut roof crush by less than half: on ' + (on * 1000).toFixed(0) + ' mm vs off ' + (off * 1000).toFixed(0) + ' mm');
+  return 'worst cabin top-row crush: supports on ' + (on * 1000).toFixed(0) + ' mm vs off ' + (off * 1000).toFixed(0) + ' mm';
+});
+
+/* 39 — band-limited damping (v2.6, item B): the per-beam filter
+   state exists as a typed array; in the noise band (sub-snap force
+   jumps) a one-step spike is attenuated to ~alpha, an alternating
+   step-rate signal settles to alpha/(2-alpha) of raw, sustained
+   real damper motion passes ~fully, and a genuine impact jump
+   bypasses the filter entirely (no delayed crash forces). */
+test('39 band-limited damping: state, spike attenuation, noise rejection, sustained + impact pass', () => {
+  const SIM = globalThis.__SIM;
+  const world = new TrackWorld(1337);
+  const car = spawnAt('sedan', world, 100, 150);
+  assert(car._dampF instanceof Float64Array && car._dampF.length === car.beams.length,
+    'per-beam damping filter state missing or wrong size');
+  const alpha = SIM.dampAlpha(SIM.DAMP_CUTOFF_HZ, 1 / 480);
+  assert(alpha > 0.3 && alpha < 0.75, 'alpha at 480 Hz = ' + alpha.toFixed(3) + ' (cutoff ' + SIM.DAMP_CUTOFF_HZ + ' Hz)');
+  const b = new Beam(0, 1, 1, { k: 1000, c: 1500, deformStrain: 0.1, breakStrain: 0.4 });
+  const arr = new Float64Array(1);
+  const RAW = 1500 * 0.8; // 1200 N — inside the noise band (< snap)
+  arr[0] = 0;
+  const f1 = SIM.beamAxialForce(b, 1, 0.8, alpha, arr, 0); // L = rest: pure damping force
+  assert(Math.abs(f1) <= 0.62 * RAW && Math.abs(f1) >= 0.3 * RAW,
+    'one-step spike passed ' + Math.abs(f1).toFixed(0) + ' N of ' + RAW + ' N raw (expected ~' + Math.round(alpha * RAW) + ')');
+  arr[0] = 0;
+  let peak = 0;
+  for (let i = 0; i < 36; i++) {
+    const f = SIM.beamAxialForce(b, 1, (i % 2 ? -0.8 : 0.8), alpha, arr, 0);
+    if (i >= 24) peak = Math.max(peak, Math.abs(f));
+  }
+  assert(peak <= 0.45 * RAW,
+    'alternating step-rate noise settled at ' + peak.toFixed(0) + ' N (bound ' + (0.45 * RAW).toFixed(0) + ', raw ' + RAW + ')');
+  arr[0] = 0;
+  let fS = 0;
+  for (let i = 0; i < 40; i++) fS = SIM.beamAxialForce(b, 1, 0.8, alpha, arr, 0);
+  assert(Math.abs(fS) >= 0.95 * RAW, 'sustained damper motion only reached ' + Math.abs(fS).toFixed(0) + ' N of ' + RAW + ' N');
+  arr[0] = 0;
+  const fI = SIM.beamAxialForce(b, 1, 20, alpha, arr, 0); // raw 30,000 N — an impact
+  assert(Math.abs(fI) >= 0.99 * 30000, 'impact damping force was filtered/delayed: ' + Math.abs(fI).toFixed(0) + ' N of 30000 N');
+  return 'alpha ' + alpha.toFixed(3) + ' @480 Hz; spike ' + Math.abs(f1).toFixed(0) + '/' + RAW + ' N, alternating steady ' +
+    peak.toFixed(0) + ' N, sustained ' + Math.abs(fS).toFixed(0) + ' N, impact ' + Math.abs(fI).toFixed(0) + ' N';
+});
+
+/* 40 — visual detail (v2.6, item E): skinned vertex totals per car
+   at the master body plan (subdiv 1) must be at least ~60% above
+   the v2.5 baselines — measured BEFORE the detail pass and recorded
+   here as constants: sedan 1044, pickup 1188, coupe 1224, suv 1080,
+   muscle 1188 (bucket pos arrays / 3, buildBuckets(def, 1)).
+   Also: the tail bucket exists, and every bucket vertex receives a
+   skin anchor — no detail piece is an unskinned static mesh. */
+test('40 visual detail: vertex totals >= +60% over v2.5, tail bucket, all vertices anchored', () => {
+  const b0 = carJs.indexOf('/* ---------- geometry bucket builder');
+  const b1 = carJs.indexOf('/* ---------- skinned car mesh');
+  assert(b0 >= 0 && b1 > b0, 'bucket region not found in js/render/car.js');
+  eval(carJs.slice(b0, b1) + '\n;globalThis.__BUCKETS40 = { subdivForTarget:subdivForTarget, buildBuckets:buildBuckets };');
+  const BK = globalThis.__BUCKETS40;
+  const BASE = { sedan: 1044, pickup: 1188, coupe: 1224, suv: 1080, muscle: 1188 };
+  const infos = [];
+  for (const def of CAR_DEFS) {
+    const B = BK.buildBuckets(def, 1);
+    let v = 0;
+    for (const k of Object.keys(B)) v += B[k].pos.length / 3;
+    assert(v >= Math.ceil(BASE[def.id] * 1.6),
+      def.id + ': ' + v + ' skinned verts < 1.6x the v2.5 baseline ' + BASE[def.id] + ' (' + Math.ceil(BASE[def.id] * 1.6) + ')');
+    assert(B.tail && B.tail.pos.length > 0, def.id + ': tail bucket empty');
+    infos.push(def.id + ' ' + v + ' (+' + Math.round(100 * (v / BASE[def.id] - 1)) + '%)');
+  }
+  const SIM = globalThis.__SIM;
+  const world = new TrackWorld(1337);
+  const car = spawnAt('muscle', world, 100, 150);
+  const B = BK.buildBuckets(CAR_DEFS.find(d => d.id === 'muscle'), 1);
+  let verts = [];
+  for (const k of Object.keys(B)) verts = verts.concat(B[k].pos);
+  const anchors = SIM.buildSkinAnchors(car, verts);
+  assert(anchors.length === verts.length / 3, 'anchors ' + anchors.length + ' != vertices ' + (verts.length / 3));
+  assert(anchors.every(a => a && (a.mode === 0 || a.mode === 1)), 'an anchor is missing its skinning mode');
+  return 'skinned verts @subdiv1: ' + infos.join('; ') + '; all ' + anchors.length + ' muscle vertices anchored';
+});
+
+/* 41 — pressured strut beams (v2.6, item C): the pressure term is
+   progressive (at 80% length it adds 5x the pure-spring force for
+   the test beam — Fp x (1/0.8 - 1) with Fp = 4x the spring force at
+   full compression), capped at Fp (at 50% length the pressure
+   component is exactly the cap, never the 1/L singularity), and
+   absent in extension. Car level: all four struts carry pressure. */
+test('41 pressured struts: progressive at 80%, capped at 50%, none in extension, struts fitted', () => {
+  const SIM = globalThis.__SIM;
+  const arr = new Float64Array(1);
+  const alpha = SIM.dampAlpha(SIM.DAMP_CUTOFF_HZ, 1 / 480);
+  const mk = pressure => new Beam(0, 1, 1, { k: 1000, c: 0, deformStrain: 0.3, breakStrain: 0.75, pressure: pressure });
+  const pure = mk(0), pres = mk(4000);
+  arr[0] = 0; const fPure80 = SIM.beamAxialForce(pure, 0.8, 0, alpha, arr, 0);
+  arr[0] = 0; const fPres80 = SIM.beamAxialForce(pres, 0.8, 0, alpha, arr, 0);
+  assert(Math.abs(fPure80 - (-200)) < 1e-9, 'pure spring at 80% = ' + fPure80 + ', expected -200');
+  assert(Math.abs(fPres80) >= 5 * Math.abs(fPure80),
+    'pressured force at 80% = ' + fPres80 + ' N, only ' + (Math.abs(fPres80 / fPure80)).toFixed(1) + 'x the pure spring (bound 5x)');
+  arr[0] = 0; const fPres50 = SIM.beamAxialForce(pres, 0.5, 0, alpha, arr, 0);
+  arr[0] = 0; const fPure50 = SIM.beamAxialForce(pure, 0.5, 0, alpha, arr, 0);
+  assert(isFinite(fPres50), 'force at 50% compression is not finite: ' + fPres50);
+  assert(Math.abs((Math.abs(fPres50) - Math.abs(fPure50)) - 4000) < 1e-6,
+    'pressure component at 50% = ' + (Math.abs(fPres50) - Math.abs(fPure50)).toFixed(1) + ' N, expected exactly the 4000 N cap');
+  arr[0] = 0; const fExt = SIM.beamAxialForce(pres, 1.2, 0, alpha, arr, 0);
+  assert(Math.abs(fExt - 200) < 1e-9, 'extension force ' + fExt + ' — pressure leaked into extension (pure spring is +200)');
+  const world = new TrackWorld(1337);
+  const car = spawnAt('sedan', world, 100, 150);
+  for (const i of car.strutBeam) assert(car.beams[i].pressure > 0, 'strut beam ' + i + ' has no pressure term');
+  return 'force at 80%: pure ' + fPure80 + ' N vs pressured ' + fPres80 + ' N (' + Math.abs(fPres80 / fPure80).toFixed(1) +
+    'x); at 50%: ' + fPres50 + ' N with the pressure component exactly at its 4000 N cap; extension pure';
+});
+
 console.log(failures === 0 ? '\nALL TESTS PASS' : '\n' + failures + ' TEST(S) FAILED');
 process.exit(failures === 0 ? 0 : 1);
