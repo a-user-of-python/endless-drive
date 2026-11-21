@@ -410,20 +410,33 @@ class Beam {
    z-fraction + ring height). Real-car ordering: the cabin safety cell
    and the frame (floor, sills, rails — the strong spine) are by far
    the strongest; door/roof/hood panels are medium-weak skins; the
-   front/rear crumple zones are soft in rate and yield early BUT keep
-   the deepest plastic travel (plasticScale > 1) so they fold
-   progressively and absorb the crash — that travel is what keeps
+   front/rear crumple zones are soft in rate and yield early so they
+   fold progressively and absorb the crash — that is what keeps
    test 2's 100 km/h compression up while the frame and cabin stay
    essentially undeformed in a moderate hit. Bumpers are the softest
    of all. The global mechanisms (progressive stiffening past yield,
    the plastic cap, the hard displacement limit) all scale off these
-   per-material values, so they keep working per zone unchanged. */
+   per-material values, so they keep working per zone unchanged.
+   v2.4 retune (issue: "wet sponge" — the whole car accordioned in a
+   hard hit): panels break much less readily again (0.32 -> 0.45),
+   frame/cabin plastic travel is cut hard (0.50/0.40 -> 0.28/0.25, so
+   the strong zones stop telescoping once yielded), the crumple
+   yield strain rises (0.06 -> 0.10, so a gap pushes back harder
+   before it folds) and its break strain rises too (0.26 -> 0.32, so
+   a folding rail keeps resisting longer before it tears) — with
+   frame break rising in step (0.60 -> 0.68) so the designed order
+   "frame/cabin tear at >= 2x the crumple strain" still holds. And
+   addBeam applies a staged gradient inside the crumple zone
+   (softest at the tip, strongest at the cabin edge) so the crush
+   localises at the ends instead of every section gap yielding at
+   once. Frame/cabin kScales move only +0.03 — the v2.3 lesson
+   stands: their strength is strains and structure, not rate. */
 const MATERIALS = {
-  bumper:     { kScale:0.22, deform:0.05, break:0.16, plastic:1.00 },
-  crumple:    { kScale:0.28, deform:0.06, break:0.22, plastic:1.25 },
-  panel:      { kScale:0.75, deform:0.08, break:0.32, plastic:0.80 },
-  frame:      { kScale:1.02, deform:0.20, break:0.55, plastic:0.50 },
-  cabin:      { kScale:1.05, deform:0.18, break:0.62, plastic:0.40 },
+  bumper:     { kScale:0.26, deform:0.07, break:0.16, plastic:1.00 },
+  crumple:    { kScale:0.33, deform:0.10, break:0.32, plastic:0.75 },
+  panel:      { kScale:0.75, deform:0.08, break:0.45, plastic:0.70 },
+  frame:      { kScale:1.05, deform:0.22, break:0.68, plastic:0.28 },
+  cabin:      { kScale:1.08, deform:0.20, break:0.68, plastic:0.25 },
   suspension: { kScale:1.00, deform:0.30, break:0.75, plastic:1.00 }
 };
 /* zone of a beam from its endpoints' REST positions:
@@ -751,7 +764,7 @@ class SoftBodyCar {
     this.secRings.forEach((ids, i)=>{ for (const id of ids) nodeSec[id] = i; });
     const isEnd = id => nodeSec[id]===0 || nodeSec[id]===S-1 ||
                         id===this.frontBumper || id===this.rearBumper;
-    const addBeam = (a, b, lng)=>{
+    const addBeam = (a, b, lng, forceZone)=>{
       if (a < 0 || b < 0 || a === b) return;
       const A = nodes[a].rest, B = nodes[b].rest;
       const dx=B.x-A.x, dy=B.y-A.y, dz=B.z-A.z, d = Math.sqrt(dx*dx+dy*dy+dz*dz);
@@ -760,8 +773,24 @@ class SoftBodyCar {
       // zone material (see MATERIALS / zoneFor): the beam's rate,
       // yield and break strains and its plastic travel all come from
       // the zone it sits in — crumple at the ends, frame low, cabin
-      // high in the middle, panels elsewhere.
-      const zone = zoneFor(A, B, def), M = MATERIALS[zone];
+      // high in the middle, panels elsewhere. forceZone pins the
+      // material for the internal-framing beams (rails, cross-members,
+      // roof bars), whose geometry would otherwise classify as panel
+      // or crumple.
+      const zone = forceZone || zoneFor(A, B, def), M = MATERIALS[zone];
+      let matK = M.kScale, matD = M.deform, matB = M.break;
+      if (zone === 'crumple' && !forceZone){
+        // staged crush gradient: the crumple zone is softest at the
+        // tip (|zm| = 0.5) and strongest where it meets the cabin
+        // (|zm| = 0.3). In a series chain of identical plastic springs
+        // EVERY gap yields at the same load and the whole car
+        // accordions; with the gradient the front gaps yield first,
+        // the crush front stalls as it reaches stronger material, and
+        // the cabin end of the zone barely moves in a moderate hit.
+        const zmA = Math.abs((A.z + B.z) * 0.5 / L);
+        const g = 0.85 + 0.35 * clamp((0.5 - zmA) / 0.2, 0, 1);
+        matK *= g; matD *= g; matB *= g;
+      }
       // longitudinal lines are SERIES chains of (S-1) beams: the whole
       // line's axial/bending stiffness is k/(S-1), so per-beam k must grow
       // with the section count to keep the tube's bending stiffness (and
@@ -781,7 +810,7 @@ class SoftBodyCar {
       // zones lives in its yield/break strains and low plastic travel
       // instead), while crumple keeps its 0.28 factor — crash
       // absorption lives there.)
-      const k = def.stiff * clamp(1.15 - d*0.12, 0.7, 1.15) * M.kScale * resK * kLng;
+      const k = def.stiff * clamp(1.15 - d*0.12, 0.7, 1.15) * matK * resK * kLng;
       // damping ratio: the original tune ran zeta ~0.12 (0.09 at high
       // resolution) — underdamped, so bumps and corners set the shell
       // ringing. Raised only to 0.13 (0.10 at high resolution): the
@@ -794,8 +823,8 @@ class SoftBodyCar {
       // relative motion; it cannot hold a load or change the parked
       // shape.
       beams.push(new Beam(a, b, d, { k:k, c:(target > RES_TARGET_DEFAULT ? 0.10 : 0.13)*2*Math.sqrt(k*rm),
-        deformStrain:M.deform,
-        breakStrain:M.break * (0.94 + 0.12*hashN(a*31+b*17)),
+        deformStrain:matD,
+        breakStrain:matB * (0.94 + 0.12*hashN(a*31+b*17)),
         plasticScale:M.plastic, mat:zone }));
     };
     // ring beams: around each section, plus skip-one chords. The chords
@@ -837,6 +866,28 @@ class SoftBodyCar {
       if ((i+j)%2 === 0) addBeam(this.secRings[i][j], this.secRings[i+1][(j+1)%P]);
       else addBeam(this.secRings[i][(j+1)%P], this.secRings[i+1][j]);
     }
+    // X-brace second diagonals (v2.4): every SIDE quad along the
+    // whole car gets BOTH diagonals. The base pattern above gives
+    // each quad one diagonal, alternating direction gap to gap —
+    // but a quad's diagonal only resists shear one way; loaded the
+    // other way it is a mechanism, and the sections rotate/nest
+    // instead of crushing (measured directly: at 50 km/h the
+    // firewall gap shortened 0.50 m while its stiffest beam showed
+    // |strain| 0.15 — the travel was rotation, not beam strain).
+    // The fold concentrated exactly at those wrong-way gaps, worst
+    // at the stiffness step where the crumple zone meets the cabin.
+    // With both diagonals the side walls are true shear webs, so a
+    // section can only shorten by straining beams — the crush the
+    // materials were tuned for. Top/bottom quads keep one diagonal
+    // (their shear is torsion, not the head-on fold path; bracing
+    // them too was tried and made the 100 km/h crush DEEPER — the
+    // stiffer end rings punch the crush further into the car).
+    for (let i=0;i<S-1;i++) for (let j=0;j<P;j++){
+      const a0 = nodes[this.secRings[i][j]].rest, a1 = nodes[this.secRings[i][(j+1)%P]].rest;
+      if (Math.abs(a0.x) < 0.25 || Math.abs(a1.x) < 0.25) continue;
+      if ((i+j)%2 === 0) addBeam(this.secRings[i][(j+1)%P], this.secRings[i+1][j]);
+      else addBeam(this.secRings[i][j], this.secRings[i+1][(j+1)%P]);
+    }
     // ring-node pickers: 'low' = lowest node on one side, 'mid' = the side
     // node closest to a reference height
     const ringSide = (ids, sx, yRef, mode)=>{
@@ -849,19 +900,91 @@ class SoftBodyCar {
       }
       return best;
     };
+    // Framing adds go through addFrame, which never duplicates an
+    // existing beam pair: where a framing line lands exactly on a
+    // beam the shell already has (the low same-j longitudinal IS the
+    // sill line where the pick does not change j between sections;
+    // a skip-one ring chord already ties some floors/roofs across),
+    // a second beam on the same pair would silently DOUBLE that
+    // pair's stiffness — and doubling frame-grade rates on the
+    // lightest nodes is exactly what pushed the coupe (the stiffest
+    // car) over the 480 Hz stability edge in its spawn settle
+    // (measured: a low rear node flung at 88.9 m/s within 1 s).
+    const pairSet = new Set(beams.map(b => b.a < b.b ? b.a + '_' + b.b : b.b + '_' + b.a));
+    const addFrame = (a, b, lng, forceZone)=>{
+      if (a < 0 || b < 0 || a === b) return;
+      const key = a < b ? a + '_' + b : b + '_' + a;
+      if (pairSet.has(key)) return;
+      pairSet.add(key);
+      addBeam(a, b, lng, forceZone);
+    };
+    // ---- internal framing (v2.4) ----
+    // Until now the cage was a single shell: the "frame" existed only
+    // as a material label on the low ring beams, and in a hard hit the
+    // sections telescoped through each other (measured: a 50 km/h
+    // head-on concertinaed the sedan from 4.95 m to 1.33 m long and
+    // flipped it). Real cars carry the crash on dedicated structure
+    // inside the shell, so the cage gets some:
+    //  - SILL RAILS: a continuous longitudinal chain along each side's
+    //    low nodes, in frame material. Where the chain follows the
+    //    shell's own low longitudinal it adds the links that line was
+    //    missing (across the sections where the low pick changes j);
+    //    where it would duplicate one, addFrame skips it (above).
+    //  - FLOOR CROSS-MEMBERS: a frame beam across the floor at every
+    //    section, tying the two rails together so a section cannot
+    //    shear sideways off its neighbours or fold as a parallelogram.
+    //  - ROOF BARS: a cabin beam across the roof at every cabin-band
+    //    section, closing the safety cell over the top (the pillars
+    //    and roof longitudinals already exist as ring/longitudinal
+    //    beams; the cell was missing its cross ties).
+    const railLo = { '-1':[], '1':[] };
+    for (const sx of [-1,1])
+      for (let i=0;i<S;i++) railLo[sx].push(ringSide(this.secRings[i], sx, 0, 'low'));
+    for (const sx of [-1,1])
+      for (let i=0;i<S-1;i++) addFrame(railLo[sx][i], railLo[sx][i+1], true, 'frame');
+    for (let i=0;i<S;i++) addFrame(railLo[-1][i], railLo[1][i], false, 'frame');
+    for (let i=0;i<S;i++){
+      if (Math.abs(this.secZ[i]) > 0.34) continue;
+      const prof = profileAt(def, this.secZ[i]);
+      addFrame(ringSide(this.secRings[i], -1, prof.yTop, 'mid'),
+               ringSide(this.secRings[i],  1, prof.yTop, 'mid'), false, 'cabin');
+    }
+    //  - UPPER LOAD PATH ("shotgun" rails): a second longitudinal
+    //    chain along each side's shoulder nodes (the node nearest
+    //    85% of the section top), running through the overhangs and
+    //    wheelhouse band (|zf| >= 0.15). The sill line alone left the
+    //    sections' resistance lopsided — strong at the bottom, soft
+    //    panels at the top — so a stopped wheel dragged the bottom
+    //    back and the clip hinged. With an upper path the section is
+    //    pushed back top and bottom together. No forced material:
+    //    the ends classify as crumple (and pick up the staged
+    //    gradient), the wheelhouse band as panel/cabin.
+    const railUp = { '-1':[], '1':[] };
+    for (const sx of [-1,1])
+      for (let i=0;i<S;i++){
+        const prof = profileAt(def, this.secZ[i]);
+        railUp[sx].push(ringSide(this.secRings[i], sx, prof.yTop * 0.85, 'mid'));
+      }
+    for (const sx of [-1,1])
+      for (let i=0;i<S-1;i++){
+        if (Math.min(Math.abs(this.secZ[i]), Math.abs(this.secZ[i+1])) < 0.15) continue;
+        addFrame(railUp[sx][i], railUp[sx][i+1], true);
+      }
     // explicit bumper rails: stiff beams from each bumper to the end
     // section's low/mid side nodes. A bumper hanging off soft diagonals
     // alone starts swinging under driving vibration, the plastic ratchet
     // feeds the swing, and the front clip gets tossed at speed.
-    const addRail = (a, b)=>{
+    const addRail = (a, b, matName)=>{
       if (a < 0 || b < 0) return;
       const A = nodes[a].rest, B = nodes[b].rest;
       const dx=B.x-A.x, dy=B.y-A.y, dz=B.z-A.z, d = Math.sqrt(dx*dx+dy*dy+dz*dz);
       if (d < 1e-6) return;
       const rm = 2*nodes[a].mass*nodes[b].mass/(nodes[a].mass+nodes[b].mass);
-      // bumper material: the softest zone — the rails are the bumper's
-      // crush structure, first to yield and first to break in a hit
-      const M = MATERIALS.bumper;
+      // default bumper material: the softest zone — the rails are the
+      // bumper's crush structure, first to yield and first to break in
+      // a hit. The stage-2 rails (to the second section) pass
+      // 'crumple': they are the crush cans behind the bumper beam.
+      const M = MATERIALS[matName || 'bumper'];
       const k = def.stiff * 0.85 * resK * M.kScale;
       // rail/mount-link damping: 0.16, up from 0.15 — the same explicit-
       // integration stability budget as the cage beams (see addBeam)
@@ -869,8 +992,27 @@ class SoftBodyCar {
       // damping spends from the same margin
       beams.push(new Beam(a, b, d, { k:k, c:0.16*2*Math.sqrt(k*rm),
         deformStrain:M.deform, breakStrain:M.break * (0.94 + 0.12*hashN(a*31+b*17)),
-        plasticScale:M.plastic, mat:'bumper' }));
+        plasticScale:M.plastic, mat:(matName || 'bumper') }));
     };
+    // stage-2 bumper rails: from each bumper to the SECOND section's
+    // low and mid side nodes, in crumple material. Staged engagement:
+    // the bumper's own soft rails take the first of the hit, these
+    // engage as the end section is driven back, and the load lands on
+    // the sill-rail line instead of only on the end ring. They are
+    // added BEFORE the bumper's own rails below: enforceBeamLimits
+    // projects beams in array order, and the exactness check (test
+    // 22) uses the LAST beam touching the front bumper — that must
+    // stay a bumper-to-end-ring rail, whose ring endpoint no later
+    // beam in the array can move (later beams touch mounts/wheels,
+    // not the end ring), or the projection would be re-disturbed.
+    if (S > 2){
+      for (const sx of [-1,1]){
+        addRail(this.frontBumper, ringSide(this.secRings[1], sx, 0, 'low'), 'crumple');
+        addRail(this.frontBumper, ringSide(this.secRings[1], sx, profF.yMid, 'mid'), 'crumple');
+        addRail(this.rearBumper, ringSide(this.secRings[S-2], sx, 0, 'low'), 'crumple');
+        addRail(this.rearBumper, ringSide(this.secRings[S-2], sx, profR.yMid, 'mid'), 'crumple');
+      }
+    }
     for (const sx of [-1,1]){
       addRail(this.frontBumper, ringSide(this.secRings[0], sx, 0, 'low'));
       addRail(this.frontBumper, ringSide(this.secRings[0], sx, profF.yMid, 'mid'));
