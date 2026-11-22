@@ -1,4 +1,16 @@
-/* ============================ INPUT / GAME FLOW ============================ */
+/* ============================ INPUT / GAME FLOW ============================
+   v2.7 additions (this file only — sim/render files untouched):
+   - menu flow: built-in + imported BeamNG cars, procedural + imported
+     BeamNG maps (load report shown on the menu), multiplayer panel
+   - LoadingScreen-driven import / join flows (js/ui/loading.js)
+   - PartsSystem (js/ui/parts.js): one instance per spawned car; the
+     engine-dead hook lives in readInput()
+   - WebRTC multiplayer wiring (js/net/multiplayer.js): the remote car
+     is a kinematic puppet (ghost) rendered here as points + beam lines
+     from the peer's snapshots; it never collides with the local car.
+   All pre-existing behaviour is preserved: car keys 1-5, R reset,
+   F repair, T resolution panel, [ ] resolution stepping, B beam view,
+   C camera, P/Esc pause, freecam, title showroom orbit. */
 const keys = {};
 let started = false, paused = false, camMode = 0; // 0 chase, 1 cockpit, 2 freecam
 let pendingDef = S.CAR_DEFS[0];
@@ -9,6 +21,15 @@ function toast(msg, ms){
   clearTimeout(toastTimer);
   toastTimer = setTimeout(()=>{ $('toast').textContent=''; }, ms||2200);
 }
+
+/* ---- v2.7 selection / world / parts state ---- */
+let driveWorld = world;                 // procedural TrackWorld, or an imported BeamngWorld
+let selCar = { kind:'builtin', def:S.CAR_DEFS[0] };   // {kind:'builtin',def} | {kind:'imported',cage,hash}
+let selMap = { kind:'procedural' };                   // | {kind:'imported'}
+let importedMap = null;                 // {converted, hash, name}
+const importedCars = [];                // {cage, hash}
+let parts = null;                       // PartsSystem for the current car
+
 /* ---- per-car beam resolution: persisted node targets + panel ---- */
 let resPanelOn = true;
 const cardResEls = [];
@@ -50,7 +71,14 @@ function saveCarRes(){
 loadCarRes();
 function updateResPanel(){
   if (!car || !carDef || !$('resCur')) return;
-  const i = S.CAR_DEFS.indexOf(carDef), t = resTargetOf(i);
+  const i = S.CAR_DEFS.indexOf(carDef);
+  if (i < 0){ // imported cage car: no per-car resolution setting
+    $('resCur').innerHTML = '<b>' + carDef.name + '</b> — imported cage<br>Nodes: ' +
+      car.nodes.length + ' · Beams: ' + car.beams.length;
+    $('resList').innerHTML = '';
+    return;
+  }
+  const t = resTargetOf(i);
   $('resCur').innerHTML = '<b>' + carDef.name + '</b> — ' + S.resNameFor(t) +
     '<br>Nodes: ' + car.nodes.length + ' (target ' + t + ') · Beams: ' + car.beams.length;
   $('resList').innerHTML = S.CAR_DEFS.map((d, j)=>{
@@ -65,9 +93,13 @@ function refreshCardRes(){
     const t = resTargetOf(i);
     cardResEls[i].textContent = 'Beam resolution: ' + S.resNameFor(t) + ' · ' + t + ' nodes';
   });
+  const mr = $('menuResLine');
+  if (mr) mr.textContent = 'Per-car beam counts: ' + S.CAR_DEFS.map((d, i)=>
+    d.name + ' ' + resTargetOf(i)).join(' · ') + ' — change in game with [ and ], remembered per car.';
 }
 function changeRes(delta){
   const i = S.CAR_DEFS.indexOf(carDef);
+  if (i < 0){ toast('Beam resolution applies to the built-in cars', 1600); return; }
   const cur = resTargetOf(i);
   const t = stepResTarget(cur, delta);
   if (t === cur){
@@ -84,14 +116,85 @@ function changeRes(delta){
     car.nodes.length + ' nodes · ' + car.beams.length + ' beams', 2600);
   refreshCardRes();
 }
+
+/* ---- spawning: built-ins (unchanged path) + imported cages ---- */
+function attachParts(){
+  if (parts && parts.dispose) parts.dispose();
+  parts = (typeof window.PartsSystem === 'function') ? new window.PartsSystem(car) : null;
+}
 function setCar(defId, sPos){
   carDef = S.CAR_DEFS.find(d=>d.id===defId) || S.CAR_DEFS[0];
-  car = S.spawnCar(carDef.id, world, (sPos===undefined ? 100 : sPos));
+  selCar = { kind:'builtin', def:carDef };
+  car = S.spawnCar(carDef.id, driveWorld, (sPos===undefined ? 100 : sPos));
   buildCarMeshes();
   document.querySelectorAll('#carBtns button').forEach(b=>b.classList.toggle('active', b.dataset.id===carDef.id));
   $('carName').textContent = carDef.name;
   chasePos = null;
+  attachParts();
   updateResPanel();
+  updateMpLocalContent();
+}
+/* A render-side def for an imported cage, derived from the cage itself:
+   bounds from its node rest positions, mass from totalMass. Only the
+   fields buildCarMeshes/buildBuckets read are synthesised; if the cage
+   car has no section rings for the skin anchors, buildCarMeshes throws
+   and spawnCage() falls back to the beam-skeleton view. */
+function pseudoDefFor(cage){
+  if (cage._pseudoDef) return cage._pseudoDef;
+  let minX=1e9,maxX=-1e9,minZ=1e9,maxZ=-1e9;
+  const nodes = cage.nodes || [];
+  for (const nd of nodes){
+    const r = nd && nd.rest ? nd.rest : nd;
+    if (!r || !isFinite(r.x) || !isFinite(r.z)) continue;
+    if (r.x<minX) minX=r.x; if (r.x>maxX) maxX=r.x;
+    if (r.z<minZ) minZ=r.z; if (r.z>maxZ) maxZ=r.z;
+  }
+  const base = S.CAR_DEFS[0];
+  const def = Object.assign({}, base, {
+    id:'cage', name:cage.name || 'Imported car',
+    length: isFinite(maxZ-minZ) && maxZ>minZ ? (maxZ-minZ) : base.length,
+    width: isFinite(maxX-minX) && maxX>minX ? (maxX-minX) : base.width,
+    mass: cage.totalMass || base.mass,
+    wheelR: (cage.wheels && cage.wheels[0] && cage.wheels[0].radius) || base.wheelR,
+    topKmh: 180
+  });
+  cage._pseudoDef = def;
+  return def;
+}
+function spawnCage(sPos){
+  if (typeof S.spawnCageCar !== 'function'){
+    if (window.LoadingScreen){
+      LoadingScreen.show('Imported car');
+      LoadingScreen.fail('This build of the sim core has no cage-car spawner (S.spawnCageCar), ' +
+        'so the imported car cannot be driven yet. The built-in cars still work.');
+    }
+    toast('Imported car cannot spawn in this build', 2400);
+    return false;
+  }
+  carDef = pseudoDefFor(selCar.cage);
+  car = S.spawnCageCar(selCar.cage, driveWorld, (sPos===undefined ? 100 : sPos));
+  try {
+    buildCarMeshes();
+  } catch (e) {
+    // skin anchors need section rings a cage may not have: show the
+    // beam skeleton instead of crashing the page.
+    debugOn = true;
+    try { buildDebug(); if (dbgGroup) dbgGroup.visible = true; } catch (e2) { /* skeleton optional */ }
+    toast('Imported car: skeleton view (no skin for this cage)', 2200);
+  }
+  document.querySelectorAll('#carBtns button').forEach(b=>b.classList.remove('active'));
+  $('carName').textContent = carDef.name;
+  chasePos = null;
+  attachParts();
+  updateResPanel();
+  updateMpLocalContent();
+  return true;
+}
+function spawnSelected(sPos){
+  return selCar.kind === 'imported' ? spawnCage(sPos) : (setCar(selCar.def.id, sPos), true);
+}
+function respawnCurrent(sPos){
+  spawnSelected(sPos===undefined ? Math.max(100, Math.floor(car.sHint || 100)) : sPos);
 }
 function readInput(){
   const inp = { throttle:0, reverse:0, brake:0, steer:0, handbrake:0 };
@@ -112,6 +215,8 @@ function readInput(){
     if (car.forwardSpeed() > 0.6) inp.brake = 1; else inp.reverse = 1;
   }
   if (keys['Space']) inp.handbrake = 1;
+  // parts hook: a dead engine (health 0 or tank empty) gives no drive
+  if (parts && parts.isEngineDead()){ inp.throttle = 0; inp.reverse = 0; }
   return inp;
 }
 window.addEventListener('keydown', e=>{
@@ -127,9 +232,11 @@ window.addEventListener('keydown', e=>{
     toast(resPanelOn?'Resolution display ON':'Resolution display OFF', 1200); }
   if (e.code === 'BracketLeft') changeRes(-1);
   if (e.code === 'BracketRight') changeRes(1);
-  if (e.code === 'KeyR'){ setCar(carDef.id, Math.max(100, Math.floor(car.sHint))); toast('Fresh ' + carDef.name, 1400); }
+  if (e.code === 'KeyR'){ respawnCurrent(); toast('Fresh ' + carDef.name, 1400); }
   if (e.code === 'KeyF'){
-    if (Math.abs(car.forwardSpeed()) < 0.6 && car.maxNodeSpeed() < 0.9){ car.repair(); toast('Repaired', 1400); }
+    if (Math.abs(car.forwardSpeed()) < 0.6 && car.maxNodeSpeed() < 0.9){
+      car.repair(); if (parts) parts.repair(); toast('Repaired', 1400);
+    }
     else toast('Stop fully to repair', 1600);
   }
   if (e.code.startsWith('Digit')){
@@ -141,6 +248,13 @@ window.addEventListener('keyup', e=>{ keys[e.code] = false; });
 function togglePause(){
   paused = !paused;
   $('pauseScr').classList.toggle('hidden', !paused);
+}
+function goToMenu(){
+  paused = false;
+  started = false;
+  $('pauseScr').classList.add('hidden');
+  $('hud').classList.add('hidden');
+  $('titleScr').classList.remove('hidden');
 }
 
 /* cameras */
@@ -187,6 +301,300 @@ function updateCamera(dt){
   }
 }
 
+/* ============================ IMPORTS ============================ */
+function readFileBytes(file, fracEnd){
+  return new Promise((resolve, reject)=>{
+    const r = new FileReader();
+    r.onprogress = e=>{
+      if (e.lengthComputable && window.LoadingScreen)
+        LoadingScreen.stage(fracEnd * (e.loaded / e.total), 'Reading ' + file.name + '…');
+    };
+    r.onload = ()=>resolve(r.result);
+    r.onerror = ()=>reject(r.error || new Error('could not read the file'));
+    r.readAsArrayBuffer(file);
+  });
+}
+function importModulesReady(kind){
+  if (window.__ZIP && typeof window.__ZIP.readZip === 'function') {
+    if (kind === 'car' && window.__JBEAM && typeof window.__JBEAM.assembleVehicle === 'function') return true;
+    if (kind === 'map' && window.__BMAP && typeof window.__BMAP.importMap === 'function') return true;
+  }
+  return false;
+}
+async function importCarZip(file){
+  LoadingScreen.show('Importing car — ' + file.name);
+  if (!importModulesReady('car')){
+    LoadingScreen.fail('The BeamNG import modules are not loaded in this build, so cars cannot be imported yet.');
+    return;
+  }
+  try {
+    const buf = await readFileBytes(file, 0.08);
+    LoadingScreen.stage(0.1, 'Reading zip…');
+    const zipMap = await window.__ZIP.readZip(buf);
+    const hash = await window.__ZIP.sha256Hex(new Uint8Array(buf));
+    LoadingScreen.log('zip sha256: ' + String(hash).slice(0, 16) + '…');
+    const cage = await window.__JBEAM.assembleVehicle(zipMap, { onProgress: p=>{
+      LoadingScreen.stage(0.1 + 0.9 * (p.frac || 0), p.msg);
+    }});
+    const entry = { cage:cage, hash:hash };
+    importedCars.push(entry);
+    LoadingScreen.log('cage ready: ' + (cage.nodes ? cage.nodes.length : '?') + ' nodes, ' +
+      (cage.beams ? cage.beams.length : '?') + ' beams');
+    addImportedCarCard(entry);
+    selectImportedCar(entry);
+    LoadingScreen.done();
+    toast('Imported ' + (cage.name || file.name), 2000);
+  } catch (err) {
+    LoadingScreen.fail('Car import failed: ' + ((err && err.message) || err));
+  }
+}
+function addImportedCarCard(entry){
+  const el = document.createElement('div');
+  el.className = 'carCard importedCard';
+  const rep = entry.cage.report || {};
+  el.innerHTML = '<div class="nm"></div><div class="bl"></div><div class="ts">Imported · BeamNG cage</div>';
+  el.querySelector('.nm').textContent = entry.cage.name || 'Imported car';
+  el.querySelector('.bl').textContent =
+    (entry.cage.nodes ? entry.cage.nodes.length : (rep.nodes || '?')) + ' nodes · ' +
+    (entry.cage.beams ? entry.cage.beams.length : (rep.beams || '?')) + ' beams' +
+    (entry.cage.totalMass ? ' · ' + Math.round(entry.cage.totalMass) + ' kg' : '');
+  el.onclick = ()=>selectImportedCar(entry, el);
+  entry._cardEl = el;
+  $('carCards').appendChild(el);
+}
+function selectImportedCar(entry, el){
+  selCar = { kind:'imported', cage:entry.cage, hash:entry.hash };
+  document.querySelectorAll('.carCard').forEach(x=>x.classList.remove('sel'));
+  (el || entry._cardEl || $('carImportCard')).classList.add('sel');
+  $('carImportCard').classList.add('imported');
+  $('carImportBlurb').textContent = (entry.cage.name || 'Imported car') + ' ready — ' +
+    (entry.cage.nodes ? entry.cage.nodes.length : '?') + ' nodes · ' +
+    (entry.cage.beams ? entry.cage.beams.length : '?') + ' beams. Click to choose another zip.';
+  if (!started) spawnSelected(100);
+  updateMpLocalContent();
+}
+async function importMapZip(file){
+  LoadingScreen.show('Importing map — ' + file.name);
+  if (!importModulesReady('map')){
+    LoadingScreen.fail('The BeamNG import modules are not loaded in this build, so maps cannot be imported yet.');
+    return;
+  }
+  try {
+    const buf = await readFileBytes(file, 0.08);
+    LoadingScreen.stage(0.1, 'Reading zip…');
+    const zipMap = await window.__ZIP.readZip(buf);
+    const hash = await window.__ZIP.sha256Hex(new Uint8Array(buf));
+    LoadingScreen.log('zip sha256: ' + String(hash).slice(0, 16) + '…');
+    const converted = await window.__BMAP.importMap(zipMap, { onProgress: p=>{
+      LoadingScreen.stage(0.1 + 0.9 * (p.frac || 0), p.msg);
+    }});
+    importedMap = { converted:converted, hash:hash, name:file.name };
+    const rep = converted.report || {};
+    (rep.missing || []).forEach(m=>LoadingScreen.log('missing: ' + String((m && m.name) || m)));
+    (rep.substitutions || []).forEach(s=>LoadingScreen.log('substituted: ' + String((s && s.name) || s)));
+    selectMap('imported');
+    renderMapReport(rep, file.name);
+    LoadingScreen.done();
+    toast('Map imported: ' + file.name, 2000);
+  } catch (err) {
+    LoadingScreen.fail('Map import failed: ' + ((err && err.message) || err));
+  }
+}
+function selectMap(kind){
+  selMap = { kind:kind };
+  $('mapCardProcedural').classList.toggle('sel', kind === 'procedural');
+  $('mapImportCard').classList.toggle('sel', kind === 'imported');
+  if (kind === 'imported') $('mapImportCard').classList.add('imported');
+  updateMpLocalContent();
+}
+function renderMapReport(rep, fileName){
+  const box = $('mapReport');
+  const counts = rep.counts || {};
+  const countLines = Object.keys(counts).map(k=>k + ': ' + counts[k]).join(' · ');
+  const list = arr => '<ul class="mrList">' + (arr || []).map(m=>
+    '<li>' + String((m && (m.name || m.asset)) || m).replace(/</g, '&lt;') + '</li>').join('') + '</ul>';
+  box.innerHTML = '<div class="mrTitle">Map load report — ' + fileName.replace(/</g, '&lt;') + '</div>' +
+    (countLines ? '<div>' + countLines + '</div>' : '<div>No counts reported.</div>') +
+    ((rep.missing && rep.missing.length) ? '<div>Missing (not in the zip — cannot be rendered):</div>' + list(rep.missing) : '<div>Nothing missing.</div>') +
+    ((rep.substitutions && rep.substitutions.length) ? '<div>Substituted textures:</div>' + list(rep.substitutions) : '');
+  box.classList.remove('hidden');
+}
+/* drag-drop onto the menu: a zip with .jbeam inside is a car; a zip
+   with terrain / level data is a map. */
+async function handleDroppedZip(file){
+  if (!file) return;
+  if (!window.__ZIP){ toast('Import modules not loaded in this build', 2000); return; }
+  try {
+    const buf = await file.arrayBuffer();
+    const zipMap = await window.__ZIP.readZip(buf);
+    let isCar = false, isMap = false;
+    zipMap.forEach((v, path)=>{
+      const p = String(path).toLowerCase();
+      if (p.endsWith('.jbeam')) isCar = true;
+      if (p.endsWith('.ter') || p.indexOf('levels/') >= 0 || p.endsWith('.level.json')) isMap = true;
+    });
+    // import functions re-read the file (cheap, local) so their
+    // progress reporting stays uniform
+    if (isCar && !isMap) importCarZip(file);
+    else if (isMap) importMapZip(file);
+    else toast('That zip has no .jbeam car or level data I recognise', 2400);
+  } catch (err) {
+    toast('Could not read that zip: ' + ((err && err.message) || err), 2400);
+  }
+}
+
+/* ============================ MULTIPLAYER WIRING ============================ */
+function mpLocalDesc(){
+  return {
+    mapName: selMap.kind === 'imported' && importedMap ? importedMap.name : 'Endless (procedural)',
+    carName: carDef ? carDef.name : pendingDef.name,
+    mapHash: selMap.kind === 'imported' && importedMap ? importedMap.hash : null,
+    carHash: selCar.kind === 'imported' ? selCar.hash : null
+  };
+}
+function updateMpLocalContent(){
+  if (!window.Multiplayer) return;
+  Multiplayer.setLocalContent(mpLocalDesc());
+  Multiplayer.setLocalCar(selCar.kind === 'imported'
+    ? { kind:'cage', name:selCar.cage.name, carHash:selCar.hash }
+    : { kind:'builtin', defId:(carDef || pendingDef).id, name:(carDef || pendingDef).name, carHash:null });
+}
+function wireMultiplayer(){
+  if (!window.Multiplayer) return;
+  const M = Multiplayer;
+  M.onLog = line=>{ const s = $('mpStatus'); if (s && M.state.status !== 'connected') s.textContent = 'Multiplayer: ' + line; };
+  M.onStatus = st=>{
+    const s = $('mpStatus');
+    if (s) s.textContent = 'Multiplayer: ' + st.status +
+      (st.attempt ? ' (attempt ' + st.attempt + '/4)' : '') +
+      (st.failReason ? ' — ' + st.failReason : '');
+    $('mpDisconnectBtn').disabled = st.status === 'idle';
+    $('mpStatusLine').classList.toggle('hidden', !(started && st.connected));
+    if (st.connected) $('mpStatusLine').textContent = 'Multiplayer: connected — peer is in your game';
+  };
+  M.onCode = code=>{ $('mpCodeOut').value = code; };
+  M.onConnected = ()=>{
+    LoadingScreen.done();
+    $('mpRecheckBtn').disabled = false;
+    toast('Multiplayer: joined', 1800);
+    updateMpLocalContent();
+  };
+  M.onContentMismatch = desc=>{
+    LoadingScreen.show('Multiplayer — content needed');
+    LoadingScreen.fail('You need the host\'s map/car — import the same zip. Host map: ' +
+      (desc && desc.mapName || '?') + ' · host car: ' + (desc && desc.carName || '?') +
+      '. Import it from the menu\'s CAR / MAP sections, then press "Re-check content".');
+    $('mpRecheckBtn').disabled = false;
+  };
+  M.onPeerGone = ()=>{ despawnRemote(); toast('Peer disconnected', 1800); };
+
+  $('mpHostBtn').onclick = ()=>{
+    updateMpLocalContent();
+    LoadingScreen.show('Multiplayer — hosting');
+    M.host().then(code=>{
+      $('mpCodeOut').value = code;
+      LoadingScreen.stage(0.4, 'Join code ready — share it, then paste the reply code in the menu and press Apply');
+      LoadingScreen.log('waiting for a reply code…');
+    }).catch(err=>LoadingScreen.fail('Hosting failed: ' + ((err && err.message) || err)));
+  };
+  $('mpJoinBtn').onclick = ()=>{
+    $('mpCodeIn').focus();
+    toast('Paste the host\'s join code, then press "Apply pasted code"', 2400);
+  };
+  $('mpApplyBtn').onclick = ()=>{
+    const code = $('mpCodeIn').value.trim();
+    if (!code){ toast('Paste a code first', 1600); return; }
+    if (M.state.mode === 'host'){
+      LoadingScreen.show('Multiplayer — connecting');
+      M.acceptReply(code).catch(err=>LoadingScreen.fail('Connect failed: ' + ((err && err.message) || err)));
+    } else {
+      updateMpLocalContent();
+      LoadingScreen.show('Multiplayer — joining');
+      M.join(code).then(reply=>{
+        $('mpCodeOut').value = reply;
+        LoadingScreen.stage(0.5, 'Reply code ready — send it to the host');
+        LoadingScreen.log('waiting for the host to connect…');
+      }).catch(err=>{
+        if (!LoadingScreen.isOpen()) LoadingScreen.show('Multiplayer — joining');
+        LoadingScreen.fail('Join failed: ' + ((err && err.message) || err));
+      });
+    }
+  };
+  $('mpRecheckBtn').onclick = ()=>{ updateMpLocalContent(); M.recheckContent(); toast('Content re-check sent', 1400); };
+  $('mpDisconnectBtn').onclick = ()=>{ M.disconnect(); despawnRemote(); };
+}
+
+/* ---- remote car: kinematic puppet (ghost) from peer snapshots ---- */
+let remoteCar = null, remoteKey = '', remotePts = null, remoteLines = null;
+function despawnRemote(){
+  if (remotePts){ scene.remove(remotePts); remotePts.geometry.dispose(); remotePts = null; }
+  if (remoteLines){ scene.remove(remoteLines); remoteLines.geometry.dispose(); remoteLines = null; }
+  remoteCar = null; remoteKey = '';
+}
+function ensureRemoteCar(hello){
+  const key = hello.kind === 'cage' ? 'cage:' + hello.name : 'def:' + hello.defId;
+  if (remoteCar && remoteKey === key) return true;
+  despawnRemote();
+  const sPos = car ? Math.max(100, Math.floor(car.sHint || 100)) : 100;
+  try {
+    if (hello.kind === 'cage'){
+      if (selCar.kind !== 'imported' || typeof S.spawnCageCar !== 'function') return false;
+      remoteCar = S.spawnCageCar(selCar.cage, driveWorld, sPos);
+    } else {
+      remoteCar = S.spawnCar(hello.defId || 'sedan', driveWorld, sPos);
+    }
+  } catch (e) { remoteCar = null; return false; }
+  remoteKey = key;
+  const n = remoteCar.nodes.length;
+  const posArr = new Float32Array(n * 3);
+  remoteCar.nodes.forEach((nd, i)=>{ posArr[i*3] = nd.pos.x; posArr[i*3+1] = nd.pos.y; posArr[i*3+2] = nd.pos.z; });
+  const pg = new THREE.BufferGeometry();
+  pg.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+  remotePts = new THREE.Points(pg, new THREE.PointsMaterial({ color:0x53e0ff, size:0.14 }));
+  remotePts.frustumCulled = false;
+  scene.add(remotePts);
+  const lp = new Float32Array(remoteCar.beams.length * 6);
+  const lg = new THREE.BufferGeometry();
+  lg.setAttribute('position', new THREE.BufferAttribute(lp, 3));
+  remoteLines = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({
+    color:0x53e0ff, transparent:true, opacity:0.45 }));
+  remoteLines.frustumCulled = false;
+  scene.add(remoteLines);
+  return true;
+}
+function updateRemote(dt){
+  const M = window.Multiplayer;
+  if (!M || !M.state.connected) return;
+  const hello = M.remote.hello, snap = M.remote.latest;
+  if (!hello || !snap) return;
+  if (!ensureRemoteCar(hello)) return;
+  const k = 1 - Math.exp(-dt * 12);
+  const n = Math.min(snap.count, remoteCar.nodes.length);
+  const off = snap.nodeOffsets;
+  for (let i = 0; i < n; i++){
+    const nd = remoteCar.nodes[i];
+    const tx = snap.pos[0] + off[i*3] / 100, ty = snap.pos[1] + off[i*3+1] / 100, tz = snap.pos[2] + off[i*3+2] / 100;
+    nd.pos.x += (tx - nd.pos.x) * k;
+    nd.pos.y += (ty - nd.pos.y) * k;
+    nd.pos.z += (tz - nd.pos.z) * k;
+    nd.vel.x = 0; nd.vel.y = 0; nd.vel.z = 0;
+  }
+  if (remotePts){
+    const arr = remotePts.geometry.attributes.position.array;
+    remoteCar.nodes.forEach((nd, i)=>{ arr[i*3] = nd.pos.x; arr[i*3+1] = nd.pos.y; arr[i*3+2] = nd.pos.z; });
+    remotePts.geometry.attributes.position.needsUpdate = true;
+  }
+  if (remoteLines){
+    const arr = remoteLines.geometry.attributes.position.array;
+    remoteCar.beams.forEach((b, i)=>{
+      const A = remoteCar.nodes[b.a].pos, B = remoteCar.nodes[b.b].pos;
+      arr[i*6] = A.x; arr[i*6+1] = A.y; arr[i*6+2] = A.z;
+      arr[i*6+3] = B.x; arr[i*6+4] = B.y; arr[i*6+5] = B.z;
+    });
+    remoteLines.geometry.attributes.position.needsUpdate = true;
+  }
+}
+
 /* title screen */
 function buildTitle(){
   const wrap = $('carCards');
@@ -196,7 +604,8 @@ function buildTitle(){
     el.innerHTML = '<div class="nm">' + d.name + '</div><div class="bl">' + d.blurb +
       '</div><div class="ts">Top speed ~' + d.topKmh + ' km/h · key ' + (i+1) + '</div><div class="res"></div>';
     cardResEls.push(el.querySelector('.res'));
-    el.onclick = ()=>{ pendingDef = d; document.querySelectorAll('.carCard').forEach(x=>x.classList.remove('sel'));
+    el.onclick = ()=>{ pendingDef = d; selCar = { kind:'builtin', def:d };
+      document.querySelectorAll('.carCard').forEach(x=>x.classList.remove('sel'));
       el.classList.add('sel'); if (!started) setCar(d.id, 100); };
     wrap.appendChild(el);
   });
@@ -209,13 +618,48 @@ function buildTitle(){
     btns.appendChild(b);
   });
   $('startBtn').onclick = startGame;
+  /* v2.7 menu wiring */
+  $('carImportCard').onclick = ()=>$('carFile').click();
+  $('carFile').addEventListener('change', e=>{ if (e.target.files[0]) importCarZip(e.target.files[0]); e.target.value=''; });
+  $('mapCardProcedural').onclick = ()=>selectMap('procedural');
+  $('mapImportCard').onclick = ()=>$('mapFile').click();
+  $('mapFile').addEventListener('change', e=>{ if (e.target.files[0]) importMapZip(e.target.files[0]); e.target.value=''; });
+  const ts = $('titleScr');
+  ts.addEventListener('dragover', e=>{ e.preventDefault(); ts.classList.add('dropActive'); });
+  ts.addEventListener('dragleave', ()=>ts.classList.remove('dropActive'));
+  ts.addEventListener('drop', e=>{
+    e.preventDefault(); ts.classList.remove('dropActive');
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) handleDroppedZip(f);
+  });
+  $('pauseResume').onclick = ()=>{ if (paused) togglePause(); };
+  $('pauseRestart').onclick = ()=>{ if (paused) togglePause(); respawnCurrent(); };
+  $('pauseMenu').onclick = goToMenu;
+  wireMultiplayer();
+  updateMpLocalContent();
 }
 function startGame(){
   if (started) return;
+  // pick the world first: imported map's world, or the procedural one
+  driveWorld = (selMap.kind === 'imported' && importedMap) ? importedMap.converted.world : world;
+  let sPos = 100;
+  if (driveWorld !== world && typeof driveWorld.spawnPoint === 'function'){
+    try { const sp = driveWorld.spawnPoint(); if (sp && typeof sp.s === 'number') sPos = sp.s; } catch (e) { /* default stands */ }
+  }
+  let ok = false;
+  try { ok = spawnSelected(sPos); } catch (err) {
+    if (window.LoadingScreen){
+      LoadingScreen.show('Starting game');
+      LoadingScreen.fail('The selected car/map could not be spawned: ' + ((err && err.message) || err));
+    }
+    driveWorld = world;
+    return;
+  }
+  if (!ok) return; // spawnCage already surfaced the reason
   started = true;
   $('titleScr').classList.add('hidden');
   $('hud').classList.remove('hidden');
-  if (!car || carDef !== pendingDef) setCar(pendingDef.id, 100);
+  updateMpLocalContent();
 }
 
 /* HUD */
@@ -231,6 +675,13 @@ function updateHUD(){
   bar.style.width = st.integrity + '%';
   bar.style.background = st.integrity > 70 ? '#57d957' : st.integrity > 40 ? '#f2b134' : '#e83a2e';
   $('beamCounts').textContent = 'Beams: ' + st.broken + ' broken · ' + st.deformed + ' bent · ' + st.total + ' total';
+  if (parts){
+    const fv = $('fuelVal'), tv = $('tempVal');
+    if (fv) fv.textContent = Math.round(parts.fuelPct()) + '% · ' + parts.fuel.toFixed(1) + ' L';
+    if (fv) fv.className = parts.fuelPct() < 10 ? 'hot' : parts.fuelPct() < 25 ? 'warn' : '';
+    if (tv) tv.textContent = Math.round(parts.tempC) + ' °C';
+    if (tv) tv.className = parts.tempC > 105 ? 'hot' : parts.tempC > 95 ? 'warn' : '';
+  }
   updateResPanel();
 }
 
@@ -243,11 +694,16 @@ function loop(){
   lastDt = dt || 1/60;
   if (car){
     if (started && !paused){
-      car.step(lastDt, readInput(), world);
+      const inp = readInput();
+      car.step(lastDt, inp, driveWorld);
+      if (parts) parts.update(lastDt, car, inp);
+      if (window.Multiplayer) Multiplayer.sendState(car);
+      updateRemote(lastDt);
     }
-    updateSkin();
+    try { updateSkin(); } catch (e) { /* cage cars may have no skin; skeleton stays */ }
     updateDebug();
-    updateChunks();
+    if (driveWorld === world){ updateChunks(); if (window.__MAPWORLD) __MAPWORLD.sync(null); }
+    else if (window.__MAPWORLD && importedMap) __MAPWORLD.sync(importedMap.converted);
     if (started){ updateCamera(lastDt); updateHUD(); }
     else { // title showroom orbit
       orbitT += dt*0.25;
