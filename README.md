@@ -5,6 +5,62 @@
 An endless, randomly generating road with smooth, blended turns — and cars
 built the way BeamNG builds them: out of **nodes and beams**.
 
+## What changed in v2.7
+
+- **Self-collision with layers.** Every node carries a collision group
+  (floor / side / roof / front / rear / cabin / wheel); nodes in
+  different groups collide with each other, so a roof now lands ON the
+  floor pan in a fold instead of passing through it (test 42: worst
+  pair distance in a crash fold 0.73× the radii sum with the pass on,
+  0.19× with it off; test 44: a parked car generates zero contacts).
+  Cost: +8% at 500 nodes (medians of 3, same session) — inside the
+  budget, earned with a mask bitset, a two-tier broadphase, and an
+  adaptive rate (240 Hz when nothing is touching, full 480 Hz for
+  0.25 s after any contact). Node-vs-beam collision is NOT included:
+  a measured naive pass cost ~1000× the per-call budget.
+- **BeamNG car import (JBeam).** Menu → Import BeamNG car: pick a
+  vehicle zip downloaded from the BeamNG resources site. The game
+  parses its .jbeam (comments, optional commas, slot tree, .pc
+  configs), converts the cage to this engine (stiffness rescaled for
+  480 Hz: K × 0.0576, damping × 0.24), generates tires from
+  pressureWheels, and drives it with the same sim. Imported cars
+  render as the beam-skeleton view. You import your own copy of a
+  zip; the game never downloads or redistributes mods.
+- **BeamNG map import (1:1 intent).** Menu → Import BeamNG map: the
+  converter reads the zip's .ter terrain, level items, decal roads,
+  DAE statics, DDS textures and forest placements, and reports every
+  referenced asset the zip does not contain — missing textures are
+  substituted with a classified fallback (grass/dirt/asphalt/…) and
+  the substitution is listed in the load report. Known limits: the
+  .ter reader is a validated reconstruction (a mismatching file
+  fails loudly, never silently), and the level-item axis convention
+  is flagged in the load report for checking against a first real
+  map. Assets a map borrows from the base game are not in its zip
+  and cannot be rendered — they are listed, not dropped silently.
+- **Loading screen.** Real progress bar + live status + scrolling log,
+  driven by the converters' actual stage events — also used for
+  multiplayer joins (connect attempts are narrated: 1/4 … joined /
+  failed with the reason).
+- **Model detail.** Built-in cars carry ~2.3× the skinned vertices of
+  v2.6 (sedan 1,980 → 4,656): rebuilt glasshouse with pillars, lamp
+  assemblies, an interior visible through the glass, per-car extras.
+- **Parts, quietly.** The 10-part system is back (radiator, engine,
+  gearbox, fuel tank, 4 tires, steering, brakes) with NO permanent
+  panel: a chip appears only when that part loses health and fades
+  after 4 s. Popups announce engine died, fuel low/empty, tire blown,
+  overheating, gearbox failed. Fuel burn and coolant temperature are
+  simulated in the game layer.
+- **Roads.** Lane lines are now three continuous ribbons per chunk
+  sharing an exact edge at chunk joints (verified <1e-9 mismatch) —
+  no more broken dashes. Asphalt tone variation, bend shading,
+  patches, tar seams, gravel shoulders.
+- **Multiplayer (WebRTC, rebuilt).** Host/join by copy-paste code,
+  visible join attempts, and a content handshake: host and joiner
+  must have imported the same map/car zips (hash-checked) before
+  anyone spawns. Remote cars are kinematic puppets (ghost — no
+  collision with the local car). Real two-browser NAT reachability
+  is untested; the state machine and message shapes are mock-tested.
+
 ## What changed in v2.6
 
 Three mechanics adapted from BeamNG.drive's documented JBeam model
@@ -525,8 +581,8 @@ parked car settles 30–60 mm onto its springs, because that is what the
 springs are for. The 1000-node tier's only real cost is performance, as
 noted above.
 
-Note: v1's WebRTC multiplayer is not in this version — it was built for
-v1's straight road and does not fit the new world.
+Note: v1's WebRTC multiplayer was replaced in v2.7 by a rebuilt
+implementation fitted to this world (see "What changed in v2.7").
 
 ## License
 
