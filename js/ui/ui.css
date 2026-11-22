@@ -1,0 +1,103 @@
+/* Endless Drive v2.7 — UI overhaul styles.
+   Loaded after index.html's legacy inline styles; rules here restyle the
+   menu / HUD / pause surfaces and own all NEW components (loading screen,
+   part chips, part popups, import cards, multiplayer panel, map report).
+   Natural proportions only — sizes follow the page's default sizing,
+   nothing is artificially inflated. No frameworks, no webfonts. */
+
+/* ---------- shared menu structure ---------- */
+.menuSection { margin: 18px 0 6px 0; }
+.menuSection > h2 { font-size: 20px; letter-spacing: 3px; margin: 0 0 4px 0; color: #eef2f6; }
+.menuSection > .hint { font-size: 15px; color: #9fb2c2; margin-bottom: 8px; }
+.menuRow { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+
+.importCard { border-style: dashed !important; }
+.importCard .bl { color: #ffd94d; }
+.importCard.imported { border-style: solid !important; border-color: #57d957 !important; }
+.importCard.imported .bl { color: #bfe8bf; }
+.dropActive { outline: 3px solid #ffd94d; outline-offset: -3px; }
+
+.mapCards { display: flex; gap: 12px; flex-wrap: wrap; margin: 10px 0; }
+.mapCard { flex: 1 1 220px; background: rgba(255,255,255,.07); border: 2px solid rgba(255,255,255,.18);
+  border-radius: 12px; padding: 12px 14px; cursor: pointer; }
+.mapCard.sel { border-color: #ffd94d; background: rgba(255,217,77,.12); }
+.mapCard .nm { font-size: 20px; font-weight: 800; }
+.mapCard .bl { font-size: 15px; color: #c6d2dd; margin-top: 3px; line-height: 1.35; }
+
+#mapReport { margin-top: 10px; font-size: 15px; line-height: 1.45; color: #dfe7ee;
+  background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.14);
+  border-radius: 10px; padding: 10px 14px; max-height: 180px; overflow: auto; }
+#mapReport .mrTitle { font-weight: 700; color: #8fd0ff; margin-bottom: 4px; }
+#mapReport .mrList { color: #f2b134; }
+#mapReport .mrList li { margin: 1px 0; }
+#mapReport ul { margin: 2px 0 6px 0; padding-left: 20px; }
+
+/* ---------- multiplayer panel ---------- */
+.mpPanel { background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.14);
+  border-radius: 10px; padding: 12px 14px; }
+.mpPanel .mpBtn { background: rgba(10,14,20,.8); color: #eef2f6; border: 1px solid rgba(255,255,255,.3);
+  font-size: 16px; font-weight: 700; padding: 8px 16px; border-radius: 8px; cursor: pointer; }
+.mpPanel .mpBtn:hover { background: #1d6fd1; border-color: #1d6fd1; }
+.mpPanel .mpBtn:disabled { opacity: .45; cursor: default; }
+.mpPanel label { font-size: 15px; color: #9fb2c2; display: block; margin: 8px 0 3px 0; }
+.mpPanel textarea { width: 100%; box-sizing: border-box; min-height: 54px; resize: vertical;
+  background: rgba(0,0,0,.4); color: #eef2f6; border: 1px solid rgba(255,255,255,.25);
+  border-radius: 8px; padding: 7px 9px; font-family: Consolas, monospace; font-size: 12px; }
+#mpStatus { font-size: 16px; font-weight: 700; color: #ffd94d; margin-top: 8px; min-height: 20px; }
+#mpStatusLine { position: absolute; top: 22px; left: 50%; transform: translateX(-50%);
+  font-size: 15px; font-weight: 700; color: #8fd0ff; text-shadow: 0 1px 6px rgba(0,0,0,.8); }
+
+/* ---------- HUD polish (same data, cleaner presentation) ---------- */
+#hud .panel { border-radius: 10px; box-shadow: 0 4px 18px rgba(0,0,0,.35); }
+#speedBox { border-left: 4px solid #1d6fd1; }
+#structBox .subRow { display: flex; justify-content: space-between; margin-top: 6px;
+  font-size: 17px; color: #cfd8e0; }
+#structBox .subRow b { color: #eef2f6; }
+#structBox .subRow b.hot { color: #e83a2e; }
+#structBox .subRow b.warn { color: #f2b134; }
+
+/* ---------- pause overlay ---------- */
+#pauseScr .card { text-align: center; max-width: 560px; }
+#pauseScr .pauseBtns { display: flex; gap: 10px; justify-content: center; margin-top: 14px; }
+#pauseScr .pauseBtns button { background: rgba(10,14,20,.8); color: #eef2f6;
+  border: 1px solid rgba(255,255,255,.3); font-size: 18px; font-weight: 700;
+  padding: 10px 22px; border-radius: 9px; cursor: pointer; }
+#pauseScr .pauseBtns button.primary { background: #1d6fd1; border-color: #1d6fd1; }
+
+/* ---------- loading screen ---------- */
+.loadScr { position: fixed; inset: 0; z-index: 40; display: flex; align-items: center;
+  justify-content: center; background: rgba(4,6,10,.72); }
+.loadCard { width: 92%; max-width: 640px; background: rgba(10,14,20,.94);
+  border: 1px solid rgba(255,255,255,.18); border-radius: 14px; padding: 22px 26px; }
+.loadTitle { font-size: 26px; font-weight: 800; letter-spacing: 1px; margin-bottom: 12px; }
+.loadBarOuter { height: 16px; }
+.loadBar { background: #1d6fd1; transition: width .15s linear; }
+.loadStatus { font-size: 17px; color: #eef2f6; margin: 10px 0 8px 0; min-height: 22px; }
+.loadLog { background: rgba(0,0,0,.45); border: 1px solid rgba(255,255,255,.12); border-radius: 8px;
+  padding: 8px 10px; height: 148px; overflow-y: auto;
+  font-family: Consolas, monospace; font-size: 13px; line-height: 1.5; color: #b9c6d2; }
+.loadErr { margin-top: 10px; font-size: 16px; line-height: 1.4; color: #ffb4a8;
+  background: rgba(46,10,10,.6); border: 1px solid #e83a2e; border-radius: 8px; padding: 9px 12px; }
+.loadBtns { margin-top: 12px; text-align: right; }
+.loadBackBtn { background: #1d6fd1; color: #fff; border: none; font-size: 16px; font-weight: 700;
+  padding: 9px 22px; border-radius: 8px; cursor: pointer; }
+
+/* ---------- part chips: transient, loss-only, corner stack ---------- */
+#partChips { position: fixed; right: 22px; bottom: 190px; z-index: 6; display: flex;
+  flex-direction: column; gap: 8px; pointer-events: none; }
+.partChip { display: flex; align-items: center; gap: 10px; min-width: 230px;
+  background: rgba(10,14,20,.82); border: 1px solid rgba(255,255,255,.2);
+  border-left: 4px solid #e83a2e; border-radius: 9px; padding: 8px 12px;
+  font-size: 16px; transition: opacity .4s linear; }
+.partChip.fading { opacity: 0; }
+.partChipName { font-weight: 700; color: #eef2f6; white-space: nowrap; }
+.partChipBarOuter { flex: 1; height: 10px; background: rgba(255,255,255,.15);
+  border-radius: 5px; overflow: hidden; }
+.partChipBar { display: block; height: 100%; }
+.partChipVal { font-weight: 700; color: #dfe7ee; min-width: 42px; text-align: right; }
+
+/* ---------- part event popups (centred-top, queued by parts.js) ---------- */
+.partsNotify { position: fixed; top: 64px; left: 50%; transform: translateX(-50%); z-index: 30;
+  background: rgba(46,14,10,.92); border: 2px solid #e83a2e; color: #ffe9e6;
+  font-size: 24px; font-weight: 800; padding: 10px 26px; border-radius: 10px;
+  text-shadow: 0 1px 4px rgba(0,0,0,.6); white-space: nowrap; }
