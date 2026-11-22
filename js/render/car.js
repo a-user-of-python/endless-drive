@@ -110,7 +110,8 @@ Bucket.prototype.box = function(cx,cy,cz,sx,sy,sz){
 function buildBuckets(def, subdiv){
   const B = { paint:new Bucket(subdiv), accent:new Bucket(subdiv), glass:new Bucket(subdiv),
               lightF:new Bucket(subdiv), lightR:new Bucket(subdiv), dark:new Bucket(subdiv),
-              tail:new Bucket(subdiv) };
+              tail:new Bucket(subdiv), chrome:new Bucket(subdiv), interior:new Bucket(subdiv),
+              lensF:new Bucket(subdiv), lensR:new Bucket(subdiv) };
   const L = def.length, W = def.width, sec = def.sections;
   const zS = i => sec[i].z*L;
   const cabTop = sec[1].yTop, hoodTop = sec[0].yTop, rearTop = sec[3].yTop;
@@ -128,9 +129,40 @@ function buildBuckets(def, subdiv){
     B.paint.box(sx*(wx+0.02), def.wheelR+0.30, sz*wz, 0.30, 0.16, def.wheelR*2+0.34);
     B.dark.box(sx*(wx+0.10), def.wheelR+0.30, sz*wz, 0.10, 0.18, def.wheelR*2+0.40); // arch trim
   }
+  /* ---- v2.7 glasshouse helpers: flat panes as single quads in the
+     side / front / rear planes. Every corner is an ordinary bucket
+     vertex, so panes anchor to cage cells exactly like the prisms
+     they replace and fold with the body in a crash. ---- */
+  // side-plane quad: sx=+1 faces +x, sx=-1 faces -x (winding mirrors)
+  const sideQuad = (bk, sx, x, yB, yT, zBF, zBB, zTF, zTB)=>{
+    if (sx > 0) bk.quad([x,yB,zBF],[x,yB,zBB],[x,yT,zTB],[x,yT,zTF],[1,0,0]);
+    else bk.quad([x,yB,zBB],[x,yB,zBF],[x,yT,zTF],[x,yT,zTB],[-1,0,0]);
+  };
+  // front-facing quad (windshield / grille plane), normal tilted by n
+  const frontQuad = (bk, hwB, hwT, yB, yT, zB, zT, n)=>{
+    bk.quad([-hwB,yB,zB],[hwB,yB,zB],[hwT,yT,zT],[-hwT,yT,zT], n || [0,0.35,0.94]);
+  };
+  // rear-facing quad (backlight / tailgate plane)
+  const rearQuad = (bk, hwB, hwT, yB, yT, zB, zT, n)=>{
+    bk.quad([hwB,yB,zB],[-hwB,yB,zB],[-hwT,yT,zT],[hwT,yT,zT], n || [0,0.35,-0.94]);
+  };
+  const glassFB = zS(1)+L*0.05, glassFT = zS(1)+L*0.14;      // windshield bottom / top z
+  const glassBB = def.id==='suv' ? -L*0.42 : -L*0.22;        // backlight bottom z
+  const glassBT = def.id==='suv' ? -L*0.44 : -L*0.31;        // backlight top z
+  const cabBackZ = def.id==='pickup' ? zS(2)+L*0.01 : glassBB;
+  const cabBackTZ = def.id==='pickup' ? zS(2)+L*0.01 : glassBT;
   // cabin / glasshouse
   if (def.id === 'pickup'){
-    B.glass.prism(zS(1)+L*0.13, zS(2)+L*0.02, W*0.40, W*0.42, sec[1].yMid+0.02, sec[2].yMid+0.02, cabTop-0.05, cabTop-0.05);
+    // v2.7: separate panes (windshield / sides / rear cab glass)
+    // instead of one glass prism, pillars between the panes
+    frontQuad(B.glass, W*0.40, W*0.36, sec[1].yMid+0.03, cabTop-0.04, glassFB, glassFT);
+    rearQuad(B.glass, W*0.38, W*0.38, sec[2].yMid+0.04, cabTop-0.06, cabBackZ, cabBackZ, [0,0,-1]);
+    for (const sx of [-1,1]){
+      sideQuad(B.glass, sx, sx*W*0.438, sec[1].yMid+0.03, cabTop-0.06, glassFB+0.03, L*0.01, glassFT, -L*0.01);
+      sideQuad(B.glass, sx, sx*W*0.438, sec[2].yMid+0.03, cabTop-0.06, -L*0.03, cabBackZ+0.02, -L*0.03, cabBackZ+0.02);
+      sideQuad(B.dark, sx, sx*W*0.452, sec[1].yMid+0.01, cabTop-0.02, glassFB+0.06, glassFB-0.03, glassFT+0.04, glassFT-0.05); // A-pillar
+      B.dark.box(sx*W*0.452, (sec[1].yMid+cabTop)*0.5, -L*0.02, 0.045, Math.max(0.2, cabTop-sec[1].yMid-0.04), 0.08); // B-pillar
+    }
     B.paint.prism(zS(1)+L*0.15, zS(2)+0.0, W*0.43, W*0.44, cabTop-0.06, cabTop-0.06, cabTop+0.04, cabTop+0.04); // roof
     // open bed: floor, walls, tailgate
     B.dark.box(0, 0.68, (zS(2)+(-L*0.53))/2, W*0.86, 0.07, (-L*0.53)-zS(2)-0.1);
@@ -138,8 +170,18 @@ function buildBuckets(def, subdiv){
     B.paint.box(0, 0.86, -L*0.515, W*0.90, 0.42, 0.07); // tailgate
     B.paint.box(0, 0.86, zS(2)-0.05, W*0.90, 0.42, 0.07); // bed front wall
   } else {
-    const glassBack = def.id==='suv' ? -L*0.44 : -L*0.30;
-    B.glass.prism(zS(1)+L*0.10, glassBack, W*0.40, W*0.42, sec[1].yMid+0.02, sec[2].yMid+0.02, cabTop-0.05, (def.id==='suv'?cabTop:rearTop+0.18));
+    // v2.7: raked windshield, inset side panes with A/B/C pillars
+    // between them, and a separate backlight — no solid glass prism
+    frontQuad(B.glass, W*0.40, W*0.36, sec[1].yMid+0.03, cabTop-0.04, glassFB, glassFT);
+    rearQuad(B.glass, W*0.40, W*0.37, sec[2].yMid+0.03, (def.id==='suv'?cabTop:rearTop+0.18)-0.02, glassBB, glassBT);
+    for (const sx of [-1,1]){
+      sideQuad(B.glass, sx, sx*W*0.438, sec[1].yMid+0.03, cabTop-0.06, glassFB+0.03, L*0.03, glassFT, L*0.0);   // front side pane
+      sideQuad(B.glass, sx, sx*W*0.438, sec[2].yMid+0.03, cabTop-0.06, -L*0.01, glassBB+0.03, -L*0.03, glassBT+0.02); // rear side pane
+      sideQuad(B.dark, sx, sx*W*0.452, sec[1].yMid+0.01, cabTop-0.02, glassFB+0.06, glassFB-0.03, glassFT+0.04, glassFT-0.05); // A-pillar
+      B.dark.box(sx*W*0.452, (sec[1].yMid+cabTop)*0.5, L*0.015, 0.045, Math.max(0.2, cabTop-sec[1].yMid-0.04), 0.08); // B-pillar
+      sideQuad(B.paint, sx, sx*W*0.455, sec[2].yMid+0.01, cabTop-0.03, glassBB+0.07, glassBB-0.09, glassBT+0.04, glassBT-0.08); // C-pillar (painted)
+      sideQuad(B.chrome, sx, sx*W*0.444, cabTop-0.075, cabTop-0.045, glassFT-0.01, glassBT+0.01, glassFT-0.01, glassBT+0.01); // chrome window surround, top edge
+    }
     B.paint.prism(zS(1)+L*0.13, (def.id==='suv'?-L*0.46:-L*0.28), W*0.42, W*0.43, cabTop-0.06, cabTop-0.06, cabTop+0.04, cabTop+0.04); // roof
     if (def.id !== 'suv'){ // trunk deck — v2.6 segmented (lid + rear slope)
       B.paint.prism(-L*0.26, -L*0.40, W*0.45, W*0.45, sec[3].yMid-0.02, sec[3].yMid-0.02, rearTop+0.10, rearTop+0.085);
@@ -211,6 +253,154 @@ function buildBuckets(def, subdiv){
       B.dark.box(sx*W*0.478, 1.02, dz, 0.03, 0.045, 0.17);
   }
   if (def.id !== 'pickup') B.dark.box(0, cabTop+0.075, -L*0.16, 0.05, 0.06, 0.16); // roof antenna fin
+
+  /* ---- v2.7 detail pass (same rule as v2.6: every piece below is
+     ordinary bucket geometry — quads, prisms and boxes whose corners
+     sit ON or just off the existing body surfaces — so every new
+     vertex is anchored through buildSkinAnchors and deforms with
+     the cage; nothing is a static overlay) ---- */
+  // headlight assemblies: dark housing, recessed lens, chrome
+  // reflector strip and an amber indicator segment per side
+  for (const sx of [-1,1]){
+    B.dark.box(sx*W*0.33, 0.72, L*0.556, W*0.235, 0.175, 0.045);          // housing
+    B.lensF.box(sx*W*0.33, 0.72, L*0.572, W*0.185, 0.115, 0.028);         // lens (recessed in the housing)
+    B.chrome.box(sx*W*0.33, 0.755, L*0.578, W*0.17, 0.028, 0.014);        // reflector strip
+    B.accent.box(sx*W*0.435, 0.72, L*0.566, W*0.045, 0.11, 0.04);         // indicator segment
+    // taillight assemblies: housing + red lens + clear reverse segment
+    B.dark.box(sx*W*0.33, 0.74, -L*0.556, W*0.235, 0.155, 0.045);
+    B.lensR.box(sx*W*0.345, 0.74, -L*0.572, W*0.155, 0.095, 0.028);
+    B.lensF.box(sx*W*0.225, 0.74, -L*0.572, W*0.05, 0.095, 0.028);         // reverse light
+    // mirror: chrome cap + glass face on the existing head
+    B.chrome.box(sx*(W*0.50+0.035), cabTop-0.28, zS(1)+0.085, 0.155, 0.095, 0.02);
+    B.lensF.box(sx*(W*0.50+0.03), cabTop-0.28, zS(1)+0.012, 0.13, 0.075, 0.016);
+    // wheel-arch lips: a paint lip standing proud of each fender box
+    for (const sz of [-1,1])
+      B.paint.box(sx*(wx+0.045), def.wheelR+0.415, sz*wz, 0.13, 0.055, def.wheelR*2+0.46);
+    // door seams as inset quads standing 4 mm proud of the skin:
+    // top seam, sill seam and the rear-door shut line (the front
+    // shut lines and handles are the v2.6 boxes above)
+    const sxq = sx*(W*0.476);
+    sideQuad(B.dark, sx, sxq, sec[1].yMid+0.015, sec[1].yMid+0.05, L*0.24, -L*0.30, L*0.24, -L*0.30); // door top seam (at the window base)
+    sideQuad(B.dark, sx, sxq, 0.44, 0.475, L*0.24, -L*0.30, L*0.24, -L*0.30);   // sill seam
+    sideQuad(B.dark, sx, sxq, 0.50, sec[1].yMid+0.02, -L*0.255, -L*0.285, -L*0.255, -L*0.285); // rear door shut line
+    for (const dz of [L*0.20, -L*0.06]) // handle recess + chrome pull
+      { B.dark.box(sx*W*0.474, 1.02, dz, 0.028, 0.085, 0.23);
+        B.chrome.box(sx*W*0.482, 1.035, dz, 0.02, 0.028, 0.17); }
+    B.chrome.box(sx*W*0.478, 0.90, -L*0.38, 0.025, 0.05, 0.14); // side badge
+  }
+  // grille: chrome slats + centre badge; front plate in a dark recess
+  for (const gy of [0.60, 0.66, 0.72]) B.chrome.box(0, gy, L*0.585, W*0.44, 0.022, 0.016);
+  B.chrome.box(0, 0.66, L*0.589, 0.075, 0.075, 0.018);                       // grille badge
+  B.dark.box(0, 0.44, L*0.606, 0.38, 0.21, 0.025);                           // front plate recess
+  B.accent.box(0, 0.44, L*0.612, 0.34, 0.17, 0.014);                         // front plate
+  // bumpers: panel-gap strips where cover meets body, painted corner
+  // caps over the accent prisms, chrome rear strip + plate lamp
+  B.dark.box(0, 0.585, L*0.545, W*0.93, 0.028, 0.03);
+  B.dark.box(0, 0.605, -L*0.545, W*0.93, 0.028, 0.03);
+  for (const sx of [-1,1]) for (const sz of [-1,1])
+    B.paint.box(sx*W*0.40, 0.44, sz*L*0.565, W*0.17, 0.24, 0.09);            // bumper corner caps
+  B.chrome.box(0, 0.60, -L*0.578, W*0.70, 0.035, 0.02);                      // rear chrome strip
+  B.dark.box(0, 0.635, -L*0.608, 0.40, 0.20, 0.025);                         // rear plate recess (behind the v2.6 plate)
+  B.chrome.box(0, 0.745, -L*0.60, 0.20, 0.03, 0.02);                         // plate lamp strip
+  B.chrome.box(0, 0.50, -L*0.582, 0.16, 0.06, 0.018);                        // rear badge
+  // exhaust: chrome outer tip + dark opening, over the v2.6 dark tips
+  for (const sx of [-1,1]){
+    B.chrome.box(sx*(W*0.30), 0.16, -L*0.465, 0.115, 0.095, 0.17);
+    B.dark.box(sx*(W*0.30), 0.16, -L*0.545, 0.085, 0.065, 0.02);
+    if (def.id==='coupe' || def.id==='muscle'){
+      B.chrome.box(sx*(W*0.16), 0.16, -L*0.465, 0.115, 0.095, 0.17);
+      B.dark.box(sx*(W*0.16), 0.16, -L*0.545, 0.085, 0.065, 0.02);
+    }
+  }
+  B.dark.box(W*0.472, 0.88, -L*0.40, 0.02, 0.15, 0.19);                      // fuel flap (right rear quarter)
+  // wipers: two dark blades lying on the windshield plane, parked at
+  // its base, plus the swept second blade angled up the glass
+  {
+    const yB = sec[1].yMid+0.035, yT = cabTop-0.04, zB = glassFB, zT = glassFT;
+    const wp = (x, t)=>[x, yB+(yT-yB)*t+0.006, zB+(zT-zB)*t+0.010];
+    for (const wx0 of [-W*0.30, W*0.06]){
+      const a = wp(wx0, 0.03), b = wp(wx0+0.035, 0.03), c = wp(wx0+0.30, 0.52), d = wp(wx0+0.265, 0.52);
+      B.dark.quad(a, b, c, d, [0,0.35,0.94]);
+    }
+    if (def.id === 'suv'){ // rear wiper on the near-vertical backlight
+      const a = [-W*0.16, sec[2].yMid+0.10, glassBB-0.012], b = [W*0.02, sec[2].yMid+0.10, glassBB-0.012];
+      const c = [W*0.05, sec[2].yMid+0.42, glassBT-0.012], d = [-W*0.13, sec[2].yMid+0.42, glassBT-0.012];
+      B.dark.quad(b, a, d, c, [0,0,-1]);
+    }
+  }
+  /* interior suggestion, seen through the now-clearer glass:
+     dashboard, wheel, seats and a rear bench, all interior-bucket
+     boxes riding cabin cage cells */
+  {
+    const yM = sec[1].yMid, dH = cabTop - yM;
+    B.interior.box(0, yM+0.20, zS(1)+L*0.015, W*0.80, 0.17, 0.30);          // dashboard
+    B.interior.box(0, yM+0.295, zS(1)+L*0.03, W*0.78, 0.035, 0.24);         // dash top pad
+    /* NOTE (v2.7, test-32 driven): no steering wheel / column and
+       no centre console. Those pieces sit near the cabin centre,
+       ~0.45 m from the nearest cage ring, and at 150 nodes the cage
+       cells are ~0.9 m long: in the 100 km/h crash the cell shear
+       put their skin-vs-rigid-fit mismatch at 0.71-0.74 m, single-
+       handedly pushing the skin-match p98 over its 0.42 m bound
+       (measured: 81 of the 109 verts over 0.40 m were the wheel).
+       The dash, seats and bench stay — their corners sit close to
+       the ring and measure fine. A wheel that tears away from the
+       cage in a crash is worse than no wheel. */
+    B.dark.box(0, cabTop-0.10, glassFT-0.03, 0.24, 0.07, 0.03);             // rear-view mirror
+    for (const sx of [-1,1]){ // front seats: base, backrest, headrest
+      B.interior.box(sx*W*0.21, yM-0.03, L*0.015, W*0.34, 0.15, 0.46);
+      B.interior.box(sx*W*0.21, yM+dH*0.36, -L*0.045, W*0.34, dH*0.60, 0.14);
+      B.interior.box(sx*W*0.21, yM+dH*0.76, -L*0.055, W*0.17, 0.13, 0.09);
+    }
+    if (def.id !== 'pickup'){ // rear bench + headrests
+      B.interior.box(0, yM-0.03, -L*0.155, W*0.72, 0.15, 0.40);
+      B.interior.box(0, yM+dH*0.34, -L*0.225, W*0.72, dH*0.58, 0.13);
+      for (const sx of [-1,1]) B.interior.box(sx*W*0.20, yM+dH*0.74, -L*0.235, W*0.17, 0.12, 0.08);
+    } else { // pickup: panel behind the seats instead of a bench
+      B.interior.box(0, yM+dH*0.30, zS(2)+L*0.045, W*0.76, dH*0.72, 0.06);
+    }
+  }
+  // sunroof: dark glass panel inset in the roof (not on the pickup's
+  // short cab roof, and clear of the roof's front row)
+  if (def.id === 'sedan' || def.id === 'coupe' || def.id === 'muscle'){
+    B.glass.box(0, cabTop+0.045, -L*0.03, W*0.52, 0.018, L*0.30);
+  }
+  /* per-car extras, v2.7 */
+  if (def.id === 'sedan'){
+    B.chrome.box(0, rearTop+0.115, -L*0.47, W*0.60, 0.03, 0.03);            // trunk chrome strip
+    for (const sx of [-1,1]) B.chrome.box(sx*W*0.478, 0.62, L*0.02, 0.02, 0.035, L*0.55); // side rub strip
+  }
+  if (def.id === 'coupe'){
+    for (const sx of [-1,1]){
+      B.dark.box(sx*W*0.465, 0.78, -L*0.20, 0.05, 0.20, 0.26);              // side vent behind the door
+      B.paint.box(sx*W*0.44, 0.62, -L*0.36, 0.10, 0.30, L*0.24);            // rear haunch
+    }
+  }
+  if (def.id === 'suv'){
+    for (const dz of [-L*0.28, L*0.02]) B.dark.box(0, cabTop+0.115, dz, W*0.62, 0.045, 0.07); // roof cross bars
+    for (const sx of [-1,1]) B.dark.box(sx*W*0.46, 0.24, 0, 0.10, 0.09, L*0.55);              // running boards
+  }
+  if (def.id === 'pickup'){
+    for (let i=0;i<5;i++) // bed floor ribs across the dark bed floor
+      B.dark.box(0, 0.725, (zS(2)-0.30) + ((-L*0.50+0.18)-(zS(2)-0.30))*i/4, W*0.82, 0.018, 0.07);
+    for (const sx of [-1,1]){
+      B.paint.box(sx*(W*0.30), 0.80, -wz-L*0.02, 0.30, 0.22, def.wheelR*2+0.30); // bed wheel tubs
+      B.dark.box(sx*(W*0.44), 0.80, wz-def.wheelR-0.28, 0.16, 0.34, 0.04);       // mud flap behind the front wheel
+      B.dark.box(sx*(W*0.44), 0.80, -wz-def.wheelR-0.28, 0.16, 0.34, 0.04);      // mud flap behind the rear wheel
+    }
+    B.dark.box(0, 0.98, -L*0.522, 0.30, 0.07, 0.03);                          // tailgate handle
+    B.chrome.box(0, 1.085, -L*0.522, W*0.86, 0.035, 0.025);                   // tailgate top strip
+    B.lensR.box(0, cabTop-0.01, zS(2)-0.015, 0.30, 0.06, 0.03);               // third brake light on the cab header
+  }
+  if (def.id === 'muscle'){
+    for (let i=0;i<4;i++){ // rear-window louvres following the backlight slope
+      const t = i/3, ly = (sec[2].yMid+0.10) + ((rearTop+0.16)-(sec[2].yMid+0.10))*t, lz = glassBB+0.02 + (glassBT-glassBB)*t;
+      B.dark.box(0, ly, lz, W*0.74, 0.028, 0.10);
+    }
+    for (const sx of [-1,1]){
+      B.dark.box(sx*0.30, hoodTop+0.105, L*0.30, 0.05, 0.03, 0.05);           // hood pins
+      B.chrome.box(sx*W*0.478, 0.335, 0, 0.025, 0.045, L*0.52);               // chrome rocker trim
+    }
+  }
   return B;
 }
 
@@ -220,7 +410,15 @@ const MATS = {};
 function makeMats(def){
   MATS.paint = new THREE.MeshPhongMaterial({ color:def.color, shininess:70, specular:0x555555 });
   MATS.accent = new THREE.MeshPhongMaterial({ color:def.accent, shininess:40 });
-  MATS.glass = new THREE.MeshPhongMaterial({ color:0x10161f, shininess:120, specular:0x99bbdd, transparent:true, opacity:0.88 });
+  // v2.7: glass is clearer (0.88 -> 0.60) so the new interior
+  // bucket (seats / dash / wheel) reads through the panes
+  MATS.glass = new THREE.MeshPhongMaterial({ color:0x1a2634, shininess:120, specular:0x99bbdd, transparent:true, opacity:0.60 });
+  // v2.7 buckets: bright trim, cabin interior, and lamp lenses
+  // (housings stay in the dark bucket; the lens sits recessed in it)
+  MATS.chrome = new THREE.MeshPhongMaterial({ color:0xd8dde2, shininess:110, specular:0xbbbbbb });
+  MATS.interior = new THREE.MeshPhongMaterial({ color:0x35302a, shininess:12 });
+  MATS.lensF = new THREE.MeshPhongMaterial({ color:0xdfeaf2, shininess:130, specular:0xccddff, transparent:true, opacity:0.92 });
+  MATS.lensR = new THREE.MeshPhongMaterial({ color:0xb01018, emissive:0x2a0003, shininess:90, specular:0xdd8888 });
   MATS.lightF = new THREE.MeshBasicMaterial({ color:0xfff6c9 });
   MATS.lightR = new THREE.MeshBasicMaterial({ color:0xff2a22 });
   // v2.6: tail bucket — deep red, emissive-tinted, for the rear
@@ -285,6 +483,13 @@ function buildCarMeshes(){
   const discG = new THREE.CylinderGeometry(0.40, 0.40, 0.30, 14); discG.rotateZ(Math.PI/2);
   const hubG = new THREE.CylinderGeometry(0.16, 0.16, 0.84, 10); hubG.rotateZ(Math.PI/2);
   const capG = new THREE.CylinderGeometry(0.11, 0.11, 0.88, 10); capG.rotateZ(Math.PI/2);
+  // v2.7 wheel detail: raised sidewall rings on both tire faces and
+  // a rim lip ring. (A caliper is deliberately NOT added: the wheel
+  // group spins as one unit, so a caliper mesh inside it would orbit
+  // the hub instead of staying fixed behind the spokes.)
+  const sidewallG = new THREE.TorusGeometry(0.79, 0.055, 8, 24); sidewallG.rotateY(Math.PI/2);
+  const rimLipG = new THREE.TorusGeometry(0.575, 0.045, 8, 20); rimLipG.rotateY(Math.PI/2);
+  const discRingG = new THREE.TorusGeometry(0.40, 0.035, 8, 20); discRingG.rotateY(Math.PI/2);
   const spokeG = new THREE.BoxGeometry(0.34, 0.52, 0.14); spokeG.translate(0, 0.33, 0);
   const tireM = new THREE.MeshPhongMaterial({ color:0x131416, shininess:8, side:THREE.DoubleSide });
   const rimM = new THREE.MeshPhongMaterial({ color:0xb9bec6, shininess:90, specular:0x888888, side:THREE.DoubleSide });
@@ -294,7 +499,12 @@ function buildCarMeshes(){
     g.add(new THREE.Mesh(tireG, tireM));
     for (const wx of [-0.41, 0.41]){ const wall = new THREE.Mesh(wallG, tireM); wall.position.x = wx; g.add(wall); }
     g.add(new THREE.Mesh(discG, discM));
+    const discRing = new THREE.Mesh(discRingG, discM); g.add(discRing); // drilled-disc edge suggestion on the brake disc
     g.add(new THREE.Mesh(rimG, rimM));
+    for (const wx of [-0.40, 0.40]){
+      const sw = new THREE.Mesh(sidewallG, tireM); sw.position.x = wx; g.add(sw);   // tire sidewall ring
+      const lip = new THREE.Mesh(rimLipG, rimM); lip.position.x = wx*0.98; g.add(lip); // rim lip
+    }
     for (let sIdx=0; sIdx<8; sIdx++){
       const sp = new THREE.Mesh(spokeG, rimM);
       sp.rotation.x = sIdx*Math.PI/4; g.add(sp);
