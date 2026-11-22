@@ -79,6 +79,7 @@
   #fatalBox button { background:#e83a2e; color:#fff; border:none; font-size:17px; font-weight:700;
     padding:8px 20px; border-radius:8px; cursor:pointer; }
 </style>
+<link rel="stylesheet" href="js/ui/ui.css">
 </head>
 <body>
 <div id="fatalBox" class="hidden">
@@ -137,7 +138,10 @@
     <div style="display:flex;justify-content:space-between"><span>Integrity</span><b id="integVal">100%</b></div>
     <div class="barOuter"><div id="integBar" class="barInner"></div></div>
     <div id="beamCounts">Beams: 0 broken · 0 bent</div>
+    <div class="subRow"><span>Fuel</span><b id="fuelVal">—</b></div>
+    <div class="subRow"><span>Coolant</span><b id="tempVal">—</b></div>
   </div>
+  <div id="mpStatusLine" class="hidden"></div>
   <div id="resBox" class="panel">
     <h3>BEAM RESOLUTION</h3>
     <div id="resCur">—</div>
@@ -160,7 +164,57 @@
     <div class="tag">Soft-body edition. Every car is a cage of nodes and beams — hit something and the
       front crumples, beams bend and snap, and the back of the car keeps coming until its beams stop it.
       Endless twisting road, and cliffs you <b>cannot</b> climb back up.</div>
-    <div class="carCards" id="carCards"></div>
+    <div class="menuSection">
+      <h2>CAR</h2>
+      <div class="hint">Pick a car, or import a BeamNG .zip (the car is rebuilt as a node/beam cage). You can also drag a zip anywhere onto this menu.</div>
+      <div class="carCards" id="carCards">
+        <div class="carCard importCard" id="carImportCard">
+          <div class="nm">Import BeamNG car (zip)…</div>
+          <div class="bl" id="carImportBlurb">Choose a .zip downloaded from the BeamNG repository.</div>
+          <div class="ts">JBeam → soft-body cage</div>
+        </div>
+      </div>
+      <input type="file" id="carFile" accept=".zip,application/zip" class="hidden">
+    </div>
+    <div class="menuSection">
+      <h2>MAP</h2>
+      <div class="mapCards" id="mapCards">
+        <div class="mapCard sel" id="mapCardProcedural">
+          <div class="nm">Endless (procedural)</div>
+          <div class="bl">The endless twisting road with cliffs, generated as you drive.</div>
+        </div>
+        <div class="mapCard importCard" id="mapImportCard">
+          <div class="nm">Import BeamNG map (zip)…</div>
+          <div class="bl" id="mapImportBlurb">Choose a BeamNG level .zip to convert 1:1.</div>
+        </div>
+      </div>
+      <input type="file" id="mapFile" accept=".zip,application/zip" class="hidden">
+      <div id="mapReport" class="hidden"></div>
+    </div>
+    <div class="menuSection">
+      <h2>MULTIPLAYER</h2>
+      <div class="hint">Two players, no server: the host shares a join code, the joiner answers with a reply code. Both players must drive the same map and car — imported zips are hash-checked.</div>
+      <div class="mpPanel">
+        <div class="menuRow">
+          <button class="mpBtn" id="mpHostBtn" type="button">Host a game</button>
+          <button class="mpBtn" id="mpJoinBtn" type="button">Join with code</button>
+          <button class="mpBtn" id="mpRecheckBtn" type="button" disabled>Re-check content</button>
+          <button class="mpBtn" id="mpDisconnectBtn" type="button" disabled>Disconnect</button>
+        </div>
+        <label for="mpCodeIn">Paste a code (host's join code if you are joining, or the joiner's reply code if you are hosting)</label>
+        <textarea id="mpCodeIn" spellcheck="false" placeholder="Paste code here…"></textarea>
+        <div class="menuRow">
+          <button class="mpBtn" id="mpApplyBtn" type="button">Apply pasted code</button>
+        </div>
+        <label for="mpCodeOut">Your code to share (join code if hosting, reply code if joining)</label>
+        <textarea id="mpCodeOut" readonly spellcheck="false" placeholder="Your code appears here…"></textarea>
+        <div id="mpStatus">Multiplayer: not connected</div>
+      </div>
+    </div>
+    <div class="menuSection">
+      <h2>BEAM RESOLUTION</h2>
+      <div class="hint" id="menuResLine">Per-car beam counts are set in game with [ and ] and remembered per car.</div>
+    </div>
     <div class="controls">
       <span class="k">W A S D / arrows</span><span>drive (S brakes, then reverses at a stop)</span>
       <span class="k">Space</span><span>handbrake</span>
@@ -179,7 +233,15 @@
 </div>
 
 <div id="pauseScr" class="overlay hidden">
-  <div class="card"><h1>PAUSED</h1><div class="tag">Press P or Esc to keep driving.</div></div>
+  <div class="card">
+    <h1>PAUSED</h1>
+    <div class="tag">Press P or Esc to keep driving.</div>
+    <div class="pauseBtns">
+      <button class="primary" id="pauseResume" type="button">Resume</button>
+      <button id="pauseRestart" type="button">Restart car</button>
+      <button id="pauseMenu" type="button">Main menu</button>
+    </div>
+  </div>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -202,8 +264,17 @@ if (!window.THREE){
 }
 </script>
 <script src="js/sim/core.js"></script>
+<script src="js/import/zip.js"></script>
+<script src="js/import/jbeam.js"></script>
+<script src="js/import/dae.js"></script>
+<script src="js/import/dds.js"></script>
+<script src="js/import/beamng-map.js"></script>
 <script src="js/render/car.js"></script>
 <script src="js/render/world.js"></script>
+<script src="js/render/mapworld.js"></script>
+<script src="js/ui/loading.js"></script>
+<script src="js/ui/parts.js"></script>
+<script src="js/net/multiplayer.js"></script>
 <script src="js/game.js"></script>
 </body>
 </html>
