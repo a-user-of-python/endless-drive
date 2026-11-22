@@ -1569,5 +1569,283 @@ test('41 pressured struts: progressive at 80%, capped at 50%, none in extension,
     'x); at 50%: ' + fPres50 + ' N with the pressure component exactly at its 4000 N cap; extension pure';
 });
 
+/* 42 — self-collision clip test (v2.7): panels must rest ON each
+   other, never pass through. (A) The roof is pressed toward the
+   floor pan by per-substep teleports (a 60 Hz teleport is fully
+   restored by the 480 Hz beams within one frame — measured — so
+   the press runs at substep rate, where strain accumulates and
+   plasticity engages): after settling, every UNMASKED roof-floor
+   pair must still be at >= 0.6x its radii sum. (B) The real fold:
+   a 100 km/h head-on, where the front clip folds onto the floor —
+   with the pass ON the closest unmasked pair in the whole car
+   measured 0.727x its radii sum; with the pass disabled at build
+   the same scenario measured 0.187x (nodes inside each other),
+   which is the discrimination this test pins. */
+test('42 self-collision clip: roof press + crash fold keep unmasked pairs >= 0.6x radii sum', () => {
+  const SIM = globalThis.__SIM, G = SIM.SC_GROUPS;
+  const minPairRatio = (car, gA, gB) => {
+    let minR = Infinity, minD = 0;
+    for (let i = 0; i < car.nodes.length; i++) {
+      if (!car._scInSet[i]) continue;
+      if (gA !== null && car._scGroup[i] !== gA) continue;
+      for (let j = 0; j < car.nodes.length; j++) {
+        if (j === i || !car._scInSet[j]) continue;
+        if (gB !== null && car._scGroup[j] !== gB) continue;
+        if (car._scMasked(i, j)) continue;
+        const A = car.nodes[i].pos, B = car.nodes[j].pos;
+        const d = Math.sqrt((A.x - B.x) ** 2 + (A.y - B.y) ** 2 + (A.z - B.z) ** 2);
+        const r = d / (car._scRad[i] + car._scRad[j]);
+        if (r < minR) { minR = r; minD = d; }
+      }
+    }
+    return { ratio: minR, dist: minD };
+  };
+  // (A) roof press
+  const world = new TrackWorld(1337);
+  const car = spawnAt('sedan', world, 100, 150);
+  stepFor(car, world, 1, NO_INPUT);
+  const roof = [];
+  for (let i = 0; i < car.nodes.length; i++) if (car._scGroup[i] === G.ROOF) roof.push(i);
+  assert(roof.length > 0, 'no ROOF group nodes found');
+  for (let f = 0; f < 960; f++) {
+    for (const i of roof) { car.nodes[i].pos.y -= 0.004; car.nodes[i].vel.y = 0; }
+    car.step(1 / 480, NO_INPUT, world);
+  }
+  stepFor(car, world, 3, NO_INPUT);
+  assert(!car.hasNaN(), 'NaN after roof press');
+  const pressRF = minPairRatio(car, G.ROOF, G.FLOOR);
+  assert(pressRF.ratio >= 0.6,
+    'roof press: closest unmasked roof-floor pair at ' + pressRF.ratio.toFixed(3) + 'x its radii sum (dist ' + pressRF.dist.toFixed(3) + ' m) — roof clipped into the floor pan');
+  // (B) crash fold, pass on vs pass off at build
+  const foldRatio = useSC => {
+    SIM.selfCollOpt.enabled = useSC;
+    const cs = crashSetup('sedan', 27.78, 150);
+    SIM.selfCollOpt.enabled = true; // restore immediately — build is done
+    for (let i = 0; i < 2500; i++) { cs.car.step(0.002, NO_INPUT, cs.world); if (i > 200 && cs.car.speed() < 0.8) break; }
+    assert(!cs.car.hasNaN(), 'NaN in crash fold (selfColl=' + useSC + ')');
+    return { all: minPairRatio(cs.car, null, null), rf: minPairRatio(cs.car, G.ROOF, G.FLOOR), contacts: cs.car.scContacts };
+  };
+  const on = foldRatio(true), off = foldRatio(false);
+  assert(on.contacts > 0, 'crash fold produced no self-collision contacts with the pass on');
+  assert(on.all.ratio >= 0.6,
+    'crash fold (pass on): closest unmasked pair at ' + on.all.ratio.toFixed(3) + 'x its radii sum — panels passed through each other');
+  assert(on.rf.ratio >= 0.6,
+    'crash fold (pass on): closest unmasked roof-floor pair at ' + on.rf.ratio.toFixed(3) + 'x its radii sum');
+  assert(off.all.ratio < 0.6,
+    'crash fold (pass off) closest pair at ' + off.all.ratio.toFixed(3) + 'x — the scenario no longer discriminates');
+  return 'roof press roof-floor min ' + pressRF.ratio.toFixed(2) + 'x radii sum (' + pressRF.dist.toFixed(2) + ' m); crash fold min pair ' +
+    on.all.ratio.toFixed(3) + 'x (roof-floor ' + on.rf.ratio.toFixed(3) + 'x, ' + on.contacts + ' contacts) vs pass-off ' + off.all.ratio.toFixed(3) + 'x';
+});
+
+/* 43 — self-collision fold test (v2.7): the upside-down roof drop
+   from test 38's scenario. The cabin must crush a sane amount
+   (band 5–150 mm of top-row travel — test 38's support-limiter
+   band is the same physics), and no chassis node may end up below
+   the floor-pan plane by more than one collision radius: local
+   height is measured in the car's own frame against the floor
+   reference node's rest height, so a node folding THROUGH the
+   floor pan is exactly what fails. */
+test('43 self-collision fold: roof drop crush in band, nothing through the floor pan', () => {
+  const world = new TrackWorld(1337);
+  const car = spawnAt('sedan', world, 100, 150);
+  const p = world.trackPoint(100);
+  const fx = Math.sin(p.heading), fz = Math.cos(p.heading);
+  const fwd = { x: fx, y: 0, z: fz };
+  const up = { x: 0, y: -1, z: 0 };
+  const right = { x: up.y * fwd.z - up.z * fwd.y, y: up.z * fwd.x - up.x * fwd.z, z: up.x * fwd.y - up.y * fwd.x };
+  car.setPoseFrame(p.x, p.y + 1.2, p.z, right, up, fwd, 0, 0, 0);
+  stepFor(car, world, 5, NO_INPUT);
+  assert(!car.hasNaN(), 'NaN in roof drop');
+  const fr = car.frame();
+  const o = car.nodes[0].pos, orr = car.nodes[0].rest;
+  let worst = 0;
+  for (let i = 0; i < car.gridS; i++) {
+    if (Math.abs(car.secZ[i]) > 0.34) continue;
+    const ids = car.secRings[i];
+    let maxY = -1e9;
+    for (const id of ids) maxY = Math.max(maxY, car.nodes[id].rest.y);
+    for (const id of ids) {
+      if (car.nodes[id].rest.y < maxY - 0.001) continue;
+      const nd = car.nodes[id];
+      const dy = (nd.pos.x - o.x) * fr.up.x + (nd.pos.y - o.y) * fr.up.y + (nd.pos.z - o.z) * fr.up.z - (nd.rest.y - orr.y);
+      if (dy < worst) worst = dy;
+    }
+  }
+  assert(worst <= -0.005 && worst >= -0.15,
+    'cabin crush ' + (worst * 1000).toFixed(0) + ' mm outside the sane band [-150, -5] mm');
+  const fp = car.nodes[car.frameFloorIdx].pos, fRestY = car.nodes[car.frameFloorIdx].rest.y;
+  const maxRad = Math.max(...car._scRad);
+  let minLocalY = Infinity;
+  for (const nd of car.nodes) {
+    if (nd.kind === 'wheel') continue;
+    const ly = (nd.pos.x - fp.x) * fr.up.x + (nd.pos.y - fp.y) * fr.up.y + (nd.pos.z - fp.z) * fr.up.z + fRestY;
+    if (ly < minLocalY) minLocalY = ly;
+  }
+  assert(minLocalY >= fRestY - maxRad,
+    'a node ended ' + (fRestY - minLocalY).toFixed(3) + ' m below the floor-pan plane (more than one radius ' + maxRad.toFixed(2) + ' m)');
+  return 'cabin crush ' + (worst * 1000).toFixed(0) + ' mm, min local height above floor plane ' +
+    (minLocalY - fRestY).toFixed(3) + ' m (bound ' + (-maxRad).toFixed(2) + ' m), ' + car.scContacts + ' self-contacts during the drop';
+});
+
+/* 44 — self-collision parked test (v2.7): every car at default
+   resolution, 3 s parked — the pass must register ZERO contacts
+   (it can only remove energy, and a parked cage's unmasked pairs
+   all start far outside their radii sums) and the cars stay under
+   the suite's existing parked speed threshold (test 1: 0.5 m/s). */
+test('44 self-collision parked: zero contacts, settled, all 5 cars @default', () => {
+  const infos = [];
+  for (const def of CAR_DEFS) {
+    const world = new TrackWorld(1337);
+    const car = spawnCar(def.id, world, 100);
+    const c0 = car.scContacts;
+    stepFor(car, world, 3, NO_INPUT);
+    assert(!car.hasNaN(), def.id + ' NaN parked');
+    assert(car.scContacts - c0 === 0,
+      def.id + ': ' + (car.scContacts - c0) + ' self-contacts while parked for 3 s');
+    const ms = car.maxNodeSpeed();
+    assert(ms < 0.5, def.id + ' not settled parked: maxSpeed ' + ms.toFixed(3));
+    infos.push(def.id + ' contacts ' + (car.scContacts - c0) + ' speed ' + ms.toFixed(3));
+  }
+  return infos.join('; ');
+});
+
+/* 45/46 — CageData import (v2.7): synthetic cages built in the
+   exact CageData format another worker's JBeam converter emits. */
+function cageBeam(a, b, k, c, ds, bs) {
+  return { a: a, b: b, k: k, c: c || 0, deformStrain: ds === undefined ? 0.2 : ds, breakStrain: bs === undefined ? 0.6 : bs, kind: 'normal' };
+}
+function boxCageData() {
+  const nodes = [];
+  const P = [[-0.8, 0.35, -1.4], [0.8, 0.35, -1.4], [0.8, 0.35, 1.4], [-0.8, 0.35, 1.4],
+             [-0.8, 1.05, -1.4], [0.8, 1.05, -1.4], [0.8, 1.05, 1.4], [-0.8, 1.05, 1.4]];
+  P.forEach((p, i) => nodes.push({ x: p[0], y: p[1], z: p[2], mass: 85, group: i < 4 ? 'floor' : 'roof', kind: 'chassis', radius: 0.09, frictionCoef: 0.8 }));
+  const wheels = [];
+  // contract order: [front-left, front-right, rear-left, rear-right]
+  [[-0.8, 1.0], [0.8, 1.0], [-0.8, -1.0], [0.8, -1.0]].forEach(w => {
+    nodes.push({ x: w[0], y: 0.33, z: w[1], mass: 13, group: 'wheel', kind: 'wheel', radius: 0.33, frictionCoef: 1.0 });
+    wheels.push({ node: nodes.length - 1, radius: 0.33 });
+  });
+  const beams = [];
+  const E = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7],
+             [0, 6], [1, 7], [2, 4], [3, 5], [0, 5], [1, 4], [2, 7], [3, 6], [0, 2], [4, 6], [1, 3], [5, 7]];
+  E.forEach(e => beams.push(cageBeam(e[0], e[1], 300000, 2500)));
+  wheels.forEach((w, wi) => {
+    const near = wi < 2 ? [2, 3, 6, 7] : [0, 1, 4, 5]; // front pair first
+    near.forEach(ci => beams.push(cageBeam(w.node, ci, 60000, 1500, 0.3, 0.75)));
+  });
+  return { name: 'boxframe', nodes: nodes, beams: beams,
+    triangles: [{ a: 0, b: 1, c: 2, collidable: true }, { a: 0, b: 2, c: 3, collidable: true }],
+    wheels: wheels, refNodes: { front: 6, rear: 5, top: 7, floor: 3 }, totalMass: 732 };
+}
+function carCageData() {
+  const nodes = [];
+  const add = (x, y, z, g) => { nodes.push({ x: x, y: y, z: z, mass: 60, group: g, kind: 'chassis', radius: 0.09, frictionCoef: 0.8 }); return nodes.length - 1; };
+  const F = {}, M = {}, R = {};
+  for (const z of [-1.9, 0, 1.9]) { F[z] = {}; for (const sx of [-0.85, 0.85]) F[z][sx] = add(sx, 0.40, z, 'floor'); }
+  const floorRefNode = add(0.7, 0.40, 0.6, 'floor');
+  for (const z of [-1.9, -0.6, 0.6, 1.9]) { M[z] = {}; for (const sx of [-0.85, 0.85]) M[z][sx] = add(sx, 0.75, z, 'cabin'); }
+  for (const z of [-0.6, 0.6]) { R[z] = {}; for (const sx of [-0.7, 0.7]) R[z][sx] = add(sx, 1.35, z, 'roof'); }
+  const wheels = [];
+  for (const z of [1.25, -1.25]) for (const sx of [-0.85, 0.85]) {
+    nodes.push({ x: sx, y: 0.33, z: z, mass: 13, group: 'wheel', kind: 'wheel', radius: 0.33, frictionCoef: 1.0 });
+    wheels.push({ node: nodes.length - 1, radius: 0.33 });
+  }
+  const beams = [];
+  const B = (a, b, k) => beams.push(cageBeam(a, b, k || 250000, 2200));
+  for (const sx of [-0.85, 0.85]) {
+    B(F[-1.9][sx], F[0][sx]); B(F[0][sx], F[1.9][sx]);
+    B(M[-1.9][sx], M[-0.6][sx]); B(M[-0.6][sx], M[0.6][sx]); B(M[0.6][sx], M[1.9][sx]);
+    B(F[-1.9][sx], M[-1.9][sx]); B(F[0][sx], M[-0.6][sx]); B(F[0][sx], M[0.6][sx]); B(F[1.9][sx], M[1.9][sx]);
+  }
+  for (const z of [-1.9, 0, 1.9]) B(F[z][-0.85], F[z][0.85]);
+  for (const z of [-1.9, -0.6, 0.6, 1.9]) B(M[z][-0.85], M[z][0.85]);
+  for (const sx of [-0.7, 0.7]) { const mx = sx < 0 ? -0.85 : 0.85; B(R[-0.6][sx], M[-0.6][mx]); B(R[0.6][sx], M[0.6][mx]); }
+  B(R[-0.6][-0.7], R[-0.6][0.7]); B(R[0.6][-0.7], R[0.6][0.7]); B(R[-0.6][-0.7], R[0.6][-0.7]); B(R[-0.6][0.7], R[0.6][0.7]);
+  B(R[-0.6][-0.7], R[0.6][0.7]); B(R[-0.6][0.7], R[0.6][-0.7]);
+  for (const z1 of [-1.9, 0]) { const z2 = z1 === -1.9 ? 0 : 1.9; B(F[z1][-0.85], F[z2][0.85]); B(F[z1][0.85], F[z2][-0.85]); }
+  for (const sx of [-0.85, 0.85]) {
+    B(F[-1.9][sx], M[-0.6][sx]); B(F[0][sx], M[-1.9][sx]); B(F[0][sx], M[0.6][sx]); B(F[1.9][sx], M[0.6][sx]);
+    B(M[-1.9][sx], M[0.6][sx]); B(M[-0.6][sx], M[1.9][sx]);
+  }
+  B(F[-1.9][-0.85], M[-1.9][0.85]); B(F[-1.9][0.85], M[-1.9][-0.85]); B(F[1.9][-0.85], M[1.9][0.85]); B(F[1.9][0.85], M[1.9][-0.85]);
+  B(M[-0.6][-0.85], R[-0.6][0.7]); B(M[-0.6][0.85], R[-0.6][-0.7]); B(M[0.6][-0.85], R[0.6][0.7]); B(M[0.6][0.85], R[0.6][-0.7]);
+  B(M[-1.9][-0.85], R[-0.6][-0.7]); B(M[-1.9][0.85], R[-0.6][0.7]); B(M[1.9][-0.85], R[0.6][-0.7]); B(M[1.9][0.85], R[0.6][0.7]);
+  B(floorRefNode, F[0][0.85]); B(floorRefNode, F[1.9][0.85]); B(floorRefNode, M[0.6][0.85]);
+  wheels.forEach(w => {
+    const nd = nodes[w.node];
+    const scored = [];
+    nodes.forEach((oo, i) => { if (oo.kind === 'wheel') return; scored.push([(oo.x - nd.x) ** 2 + (oo.z - nd.z) ** 2, i]); });
+    scored.sort((a, b) => a[0] - b[0]);
+    for (let q = 0; q < 3; q++) beams.push(cageBeam(w.node, scored[q][1], 60000, 1500, 0.3, 0.75));
+  });
+  return { name: 'simplecar', nodes: nodes, beams: beams,
+    triangles: [{ a: F[0][-0.85], b: F[0][0.85], c: M[-0.6][0.85], collidable: true }],
+    wheels: wheels, refNodes: { front: M[1.9][0.85], rear: M[-1.9][0.85], top: R[0.6][0.7], floor: floorRefNode },
+    totalMass: nodes.reduce((s, n) => s + n.mass, 0) };
+}
+
+/* 45 — CageData: rigid box frame via spawnCageCar settles, stats
+   work, triangles are stored, and the drivetrain drives it (the
+   box's wheels are beamed to the corners, so tyre forces at the
+   wheel/mount split have a structure to push on). */
+test('45 CageData box frame: settles, stats, triangles stored, drives', () => {
+  const SIM = globalThis.__SIM;
+  assert(typeof SIM.spawnCageCar === 'function', 'spawnCageCar not exported from the sim core');
+  const cage = boxCageData();
+  const world = new TrackWorld(1337);
+  const car = SIM.spawnCageCar(cage, world, 100);
+  assert(car.nodes.length === cage.nodes.length, 'node count ' + car.nodes.length + ' != cage ' + cage.nodes.length);
+  assert(car.beams.length === cage.beams.length, 'beam count ' + car.beams.length + ' != cage ' + cage.beams.length);
+  assert(car.triangles && car.triangles.length === cage.triangles.length,
+    'triangles not stored: ' + (car.triangles && car.triangles.length));
+  assert(car.frontBumper === cage.refNodes.front && car.rearBumper === cage.refNodes.rear &&
+         car.frameTopIdx === cage.refNodes.top && car.frameFloorIdx === cage.refNodes.floor,
+    'frame refs do not match cage refNodes');
+  stepFor(car, world, 2, NO_INPUT);
+  assert(!car.hasNaN(), 'NaN in cage box after 2 s');
+  const ms = car.maxNodeSpeed();
+  assert(ms < 0.5, 'cage box not settled: maxSpeed ' + ms.toFixed(3));
+  const st = car.stats();
+  assert(st.total === cage.beams.length && st.integrity === 100,
+    'stats broken on cage car: ' + JSON.stringify(st));
+  assert(car.frame().up.y > 0.9, 'cage box ended tipped (up.y ' + car.frame().up.y.toFixed(2) + ')');
+  stepFor(car, world, 3, { throttle: 1, reverse: 0, brake: 0, steer: 0, handbrake: 0 });
+  assert(!car.hasNaN(), 'NaN driving cage box');
+  const v = car.forwardSpeed();
+  assert(v > 3, 'cage box barely drives: forward speed ' + v.toFixed(2) + ' m/s after 3 s of throttle');
+  return 'box ' + car.nodes.length + 'n/' + car.beams.length + 'b settled (maxSpeed ' + ms.toFixed(3) +
+    '), integrity ' + st.integrity + '%, triangles ' + car.triangles.length + ' stored, drives at ' + (v * 3.6).toFixed(0) + ' km/h';
+});
+
+/* 46 — CageData: car-shaped cage passes the self-collision parked
+   test (zero contacts in 3 s parked, settled, upright) — the cage
+   path builds its groups from the cage group strings and its
+   radii from the cage node radii, so the parked guarantee of
+   test 44 must hold for imported cars too. */
+test('46 CageData car body: parked self-collision clean (zero contacts, settled)', () => {
+  const SIM = globalThis.__SIM, G = SIM.SC_GROUPS;
+  const cage = carCageData();
+  const world = new TrackWorld(1337);
+  const car = SIM.spawnCageCar(cage, world, 100);
+  assert(car.nodes.length === cage.nodes.length && car.beams.length === cage.beams.length, 'cage counts mismatch');
+  let hasRoof = false, hasFloor = false;
+  for (let i = 0; i < car.nodes.length; i++) {
+    if (car._scGroup[i] === G.ROOF) hasRoof = true;
+    if (car._scGroup[i] === G.FLOOR) hasFloor = true;
+  }
+  assert(hasRoof && hasFloor, 'cage groups did not map to ROOF/FLOOR layers');
+  const c0 = car.scContacts;
+  stepFor(car, world, 3, NO_INPUT);
+  assert(!car.hasNaN(), 'NaN in cage car parked');
+  assert(car.scContacts - c0 === 0, 'cage car registered ' + (car.scContacts - c0) + ' self-contacts parked');
+  const ms = car.maxNodeSpeed();
+  assert(ms < 0.5, 'cage car not settled: maxSpeed ' + ms.toFixed(3));
+  assert(car.frame().up.y > 0.9, 'cage car ended tipped (up.y ' + car.frame().up.y.toFixed(2) + ')');
+  const st = car.stats();
+  assert(st.integrity === 100, 'cage car integrity ' + st.integrity + ' parked');
+  return 'car cage ' + car.nodes.length + 'n/' + car.beams.length + 'b, contacts ' + (car.scContacts - c0) +
+    ' in 3 s parked, maxSpeed ' + ms.toFixed(3) + ', up.y ' + car.frame().up.y.toFixed(2);
+});
+
 console.log(failures === 0 ? '\nALL TESTS PASS' : '\n' + failures + ' TEST(S) FAILED');
 process.exit(failures === 0 ? 0 : 1);
