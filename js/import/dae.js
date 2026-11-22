@@ -128,6 +128,6 @@ function parseDAE(text){
   for(const lib of findAll(root,'library_visual_scenes')) for(const scene of lib.children) if(scene.tag==='visual_scene') for(const n of scene.children) if(n.tag==='node') walk(n, matIdentity());
   return { meshes:meshes, nodes:nodes, materials:materials, notes:notes };
 }
-const API={ parseDAE:parseDAE, tokenizeXML:tokenizeXML };
+{ const API={ parseDAE:parseDAE, tokenizeXML:tokenizeXML };
 if (typeof globalThis!=='undefined') globalThis.__DAE = API;
-if (typeof module!=='undefined') module.exports = API;
+if (typeof module!=='undefined') module.exports = API; }
