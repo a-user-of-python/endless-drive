@@ -68,7 +68,8 @@ function grassBladeTexture(){
 }
 const terrainMat = new THREE.MeshLambertMaterial({ vertexColors:true, map:speckleCanvas('#f2f2f2', 5200, 198, 248, 4242) });
 const roadMat = new THREE.MeshLambertMaterial({ vertexColors:true, map:speckleCanvas('#f4f4f4', 7000, 150, 235, 919) });
-const markMat = new THREE.MeshBasicMaterial({ color:0xf2f2f2 });
+const markMat = new THREE.MeshBasicMaterial({ color:0xf2f2f2, side:THREE.DoubleSide });
+const centerMat = new THREE.MeshBasicMaterial({ color:0xf2c230, side:THREE.DoubleSide });
 const trunkMat = new THREE.MeshLambertMaterial({ color:0x6b4a2c });
 const leafMats = [0x3e7d32, 0x4c8a3a, 0x356b2a].map(c=>new THREE.MeshLambertMaterial({ color:c }));
 const rockMat = new THREE.MeshLambertMaterial({ color:0x8a857e, map:rockCanvas() });
@@ -133,8 +134,41 @@ function buildChunk(idx){
       const slope = Math.abs(world.heightAtSL(s+1.5, lat).h - world.heightAtSL(s-1.5, lat).h)/3
                   + Math.abs(world.heightAtSL(s, lat+1.5).h - world.heightAtSL(s, lat-1.5).h)/3;
       let cr, cg, cb;
-      if (Math.abs(lat) <= 4.6){ const v = 0.20 + hash2(s, lat)*0.03; cr=v; cg=v+0.015; cb=v+0.03; }        // asphalt
+      if (Math.abs(lat) <= 4.6){
+        /* asphalt (v2.7 renderer-side variation, all derived from
+           trackPoint/heightAtSL data — colours only, the mesh heights
+           above are untouched so physics/collision cannot diverge):
+           - per-chunk tone shift (hash of the chunk index)
+           - camber shading in bends: overall darkening with
+             |curvature| plus a lateral gradient across the carriageway
+             (the inside of the bend reads slightly darker)
+           - patched-asphalt rectangles: an 11 m s-band whose hash
+             picks a lateral sub-band that renders darker (newer tar)
+           - tar seams across the lanes at hashed ~23 m intervals,
+             shaded by distance to the seam centre */
+        let v = 0.20 + hash2(s, lat)*0.03;
+        v *= 0.93 + hash2(idx, 71)*0.14;                                     // per-chunk asphalt tone
+        const kk = p.curvature || 0;
+        v *= 1 - Math.min(0.16, Math.abs(kk)*9);                            // bend darkening
+        v += -kk*lat*0.012;                                                 // camber gradient across the road
+        const pid = Math.floor(s/11);
+        if (hash2(pid, 99) < 0.30){
+          const pl0 = -4.2 + hash2(pid, 5)*6.0;
+          if (lat >= pl0 && lat <= pl0 + 2.3) v *= 0.72;                    // patched asphalt patch
+        }
+        const si = Math.floor(s/23), seamC = si*23 + hash2(si, 31)*8 + 0.5;
+        const seamD = Math.abs(s - seamC);
+        if (seamD < 1.5) v *= 0.68 + 0.32*(seamD/1.5);                      // tar seam across the lanes
+        cr=v; cg=v+0.015; cb=v+0.03;
+      }
       else if (slope > 0.85){ cr=0.44; cg=0.41; cb=0.37; }                                                  // rock (cliff walls)
+      else if (info.surface === 'grass' && Math.abs(lat) <= 6.4 + Math.min(1.8, Math.abs(p.curvature || 0)*140) + 0.5*Math.sin(s*0.013 + 1.3)){
+        // gravel shoulder strip (v2.7): width varies smoothly with s
+        // and widens in bends (larger |curvature|); only on ground
+        // heightAtSL already classifies as grass, so cliff rock/floor
+        // colouring below is untouched
+        const v = 0.42 + hash2(Math.floor(s*3), Math.floor(lat*7))*0.10; cr=v; cg=v*0.94; cb=v*0.82;
+      }
       else if (info.h < p.y - 8){ const v = 0.55 + hash2(s, lat)*0.08; cr=v; cg=v*0.88; cb=v*0.62; }        // cliff floor sand
       else { const v = hash2(Math.floor(s/3), Math.floor(lat)); cr=0.16+v*0.05; cg=0.36+v*0.10; cb=0.14+v*0.04; } // grass
       col.push(cr, cg, cb);
@@ -170,28 +204,43 @@ function buildChunk(idx){
   const roadMesh = new THREE.Mesh(rg, roadMat); roadMesh.frustumCulled = false;
   g.add(roadMesh);
   disposables.push(tg, rg);
-  // road markings: edge lines + center dashes
-  const mp = [];
-  const quadW = (cx, cy, cz, rx, rz, hw, hl)=>{
-    // axis-aligned-in-track-space quad: right vector (rx,rz), fwd = (-rz, rx)
-    const fx = -rz, fz = rx;
-    mp.push(cx-rx*hw-fx*hl, cy, cz-rz*hw-fz*hl,  cx+rx*hw-fx*hl, cy, cz+rz*hw-fz*hl,  cx+rx*hw+fx*hl, cy, cz+rz*hw+fz*hl);
-    mp.push(cx-rx*hw-fx*hl, cy, cz-rz*hw-fz*hl,  cx+rx*hw+fx*hl, cy, cz+rz*hw+fz*hl,  cx-rx*hw+fx*hl, cy, cz-rz*hw+fz*hl);
-  };
-  for (let s = s0; s < s0+CHUNK; s += 3){
-    const p = world.trackPoint(s+1.5);
-    const rx = Math.cos(p.heading), rz = -Math.sin(p.heading);
-    for (const side of [-1,1]){
-      const lat = side*4.25;
-      quadW(p.x+rx*lat, p.y+0.03, p.z+rz*lat, rx, rz, 0.09, 1.5);
+  /* road markings (v2.7): SOLID continuous ribbons — an unbroken
+     centre line and both edge lines — instead of the old per-3 m
+     quads (which read as broken at every heading change) and the
+     dashed centre. Each ribbon is a triangle strip sampled every
+     1.5 m along trackPoint(s); consecutive samples share an edge, so
+     joints inside the chunk are mitered by construction with no
+     gaps. Chunk joints: the strip runs from s0 to s0+CHUNK
+     INCLUSIVE, and the final sample is taken at exactly s0+CHUNK —
+     the same trackPoint/heightAtSL values the next chunk samples
+     for its first row — so neighbouring chunks' ribbons share an
+     identical boundary edge and meet with neither a gap nor an
+     overlap (no z-fighting). Heights come from heightAtSL at the
+     line's own lateral offset (+0.035), i.e. the same surface the
+     road mesh is built from, defects included. */
+  const ribbon = (latC, hw, mat)=>{
+    const rp = [], ri = [];
+    const step = 1.5, n = Math.round(CHUNK/step);
+    for (let i=0; i<=n; i++){
+      const s = s0 + i*step;
+      const p = world.trackPoint(s);
+      const rx = Math.cos(p.heading), rz = -Math.sin(p.heading);
+      for (const e of [-1,1]){
+        const lat = latC + e*hw;
+        rp.push(p.x + rx*lat, world.heightAtSL(s, lat).h + 0.035, p.z + rz*lat);
+      }
+      if (i < n){ const a = i*2; ri.push(a, a+1, a+2, a+1, a+3, a+2); }
     }
-    if ((s/3) % 2 === 0) quadW(p.x, p.y+0.03, p.z, rx, rz, 0.13, 1.4); // dash
-  }
-  const mg = new THREE.BufferGeometry();
-  mg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(mp), 3));
-  mg.computeVertexNormals();
-  const markMesh = new THREE.Mesh(mg, markMat); markMesh.frustumCulled = false; // world coords, see terrain above
-  g.add(markMesh);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(rp), 3));
+    geo.setIndex(ri); geo.computeVertexNormals();
+    disposables.push(geo);
+    const mesh = new THREE.Mesh(geo, mat); mesh.frustumCulled = false; // world coords, see terrain above
+    g.add(mesh);
+  };
+  ribbon(-4.25, 0.09, markMat);   // left edge line
+  ribbon( 4.25, 0.09, markMat);   // right edge line
+  ribbon( 0,    0.13, centerMat); // solid centre line
   // obstacles in this chunk's segments
   const segA = Math.floor(s0/50), segB = Math.floor((s0+CHUNK)/50);
   for (let seg = segA; seg <= segB; seg++){
@@ -219,7 +268,6 @@ function buildChunk(idx){
       }
     }
   }
-  disposables.push(mg);
   /* ---- environment dressing (all deterministic per chunk, all placed
      in TRACK SPACE with a hard lateral exclusion: nothing decorative
      inside |lat| <= ROAD_HALF + margin) ---- */
