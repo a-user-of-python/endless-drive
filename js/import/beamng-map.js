@@ -325,6 +325,6 @@ class BeamngWorld{
   getObstacles(x,z,sHint){ const out=[]; for(const o of this._obstacles){ const dx=o.x-x, dz=o.z-z; if(dx*dx+dz*dz<3600) out.push(o); } for(const o of this.extraObstacles){ const dx=o.x-x, dz=o.z-z; if(dx*dx+dz*dz<3600) out.push(o); } return out; }
   obstaclesNear(x,z,sHint){ return this.getObstacles(x,z,sHint); }
 }
-const API={ importMap:importMap, BeamngWorld:BeamngWorld, parseTer:parseTer, makeHeightfield:makeHeightfield, classifySurface:classifySurface, makeFallbackTexture:makeFallbackTexture, parseJsonLines:parseJsonLines, buildRibbon:buildRibbon };
+{ const API={ importMap:importMap, BeamngWorld:BeamngWorld, parseTer:parseTer, makeHeightfield:makeHeightfield, classifySurface:classifySurface, makeFallbackTexture:makeFallbackTexture, parseJsonLines:parseJsonLines, buildRibbon:buildRibbon };
 if (typeof globalThis!=='undefined') globalThis.__BMAP = API;
-if (typeof module!=='undefined') module.exports = API;
+if (typeof module!=='undefined') module.exports = API; }
