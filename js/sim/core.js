@@ -746,6 +746,24 @@ const carRes = CAR_DEFS.map(()=>RES_TARGET_DEFAULT);
    limiters disabled to measure what they do). Game code never
    touches this; per-car opt-out is SoftBodyCar's opts.noSupports. */
 const supportOpt = { enabled:true };
+/* v2.7: self-collision build switch (test 42 builds a car with the
+   pass disabled to prove the clip scenario discriminates). Game code
+   never touches this; per-car opt-out is SoftBodyCar's opts.noSelfColl. */
+const selfCollOpt = { enabled:true };
+/* Self-collision layer/group ids (v2.7): every chassis node belongs
+   to exactly one group, assigned at build from its rest position —
+   the section band along the car (front clip / cabin band / rear
+   clip) and, inside the cabin band, its height band and side. The
+   groups are the "layers" of the requirement: nodes of different
+   parts of the shell may not pass through each other. Wheels are
+   their own group and stay out of the self-collision set (a wheel
+   is a single node; its strut and links locate it). */
+const SC_GROUPS = { FLOOR:0, LEFT:1, RIGHT:2, ROOF:3, FRONT:4, REAR:5, CABIN:6, WHEEL:7 };
+/* Self-collision broadphase grid cap (cells) and the 13 forward
+   neighbour offsets (lexicographic half-neighbourhood on (z,y,x))
+   that make every unordered cell pair be visited exactly once. */
+const SC_GRID_MAX = 65536;
+const SC_FWD = [[1,0,0],[-1,1,0],[0,1,0],[1,1,0],[-1,-1,1],[0,-1,1],[1,-1,1],[-1,0,1],[0,0,1],[1,0,1],[-1,1,1],[0,1,1],[1,1,1]];
 
 /* ---------------- Soft-body car ---------------- */
 class SoftBodyCar {
@@ -753,6 +771,14 @@ class SoftBodyCar {
     this.def = def; this.world = world;
     this.targetNodes = (targetNodes===undefined ? RES_TARGET_DEFAULT : targetNodes);
     this.noSupports = !!(opts && opts.noSupports);
+    this.noSelfColl = !!(opts && opts.noSelfColl);
+    // CageData hook (v2.7, for JBeam import): when opts.cage is
+    // present, buildStructure builds the car from the cage instead
+    // of the procedural grid — see buildCageStructure. triangles is
+    // stored for later node-vs-triangle work (no collision yet).
+    this.cageData = (opts && opts.cage) || null;
+    this.triangles = [];
+    this._cageWheelR = null;
     this.buildStructure();
     // band-limited damping state: one filtered-force slot per beam
     // (see beamAxialForce). Zeroed here and on repair().
@@ -814,6 +840,9 @@ class SoftBodyCar {
       for (let i=0;i<this.nodes.length;i++) grav[i*3+1] = -9.81*this.nodes[i].mass;
       this._gravF = grav;
     }
+    // self-collision tables (groups, radii, 2-hop mask, broadphase
+    // buffers) — built once, see buildSelfCollision
+    this.buildSelfCollision();
     // beam subcycle count for this cage (used in substep). v2.5: the
     // schedule is 2 at every target above Normal — v2.4 ran 3 past 500
     // nodes, which cost ~50% more beam evaluations than 2 for margin
@@ -861,6 +890,7 @@ class SoftBodyCar {
     this._F = null; // reused per-substep force buffer (see substep)
   }
   buildStructure(){
+    if (this.cageData){ this.buildCageStructure(); return; }
     const def = this.def, L = def.length, W = def.width;
     const target = clamp(Math.round(this.targetNodes||RES_TARGET_DEFAULT), 40, 2000);
     const grid = chooseGrid(target);
@@ -1507,6 +1537,376 @@ class SoftBodyCar {
     this.frontNodes = [this.frontBumper].concat(lowHalf(this.secRings[0], profF.yMid));
     this.rearNodes = [this.rearBumper].concat(lowHalf(this.secRings[S-1], profR.yMid));
   }
+  /* ---------------- CageData build (v2.7) ----------------
+     Builds nodes/beams from an imported cage (CageData format —
+     see the task spec: nodes with rest-frame x=right/y=up/z=fwd,
+     beams with explicit k/c/strains, wheels as node indices,
+     refNodes for frame()). Everything the constructor and step()
+     do after buildStructure runs unchanged on the result:
+     - node objects are shaped exactly like the procedural ones
+       ({pos, vel, rest, mass, kind, radius}); the cage's per-node
+       radius is kept (wheel nodes get their cage wheel radius).
+     - beams are Beam instances built from the cage's k/c/strain
+       fields (kind 'support' keeps its slack-limiter semantics,
+       engage/pressure pass through).
+     - wheelIdx comes from cage.wheels IN ORDER, assumed
+       [front-left, front-right, rear-left, rear-right] — step()'s
+       wheel loop treats w<2 as the front (steered) axle and the
+       def's drive layout (FWD/RWD/4WD from the base def that
+       spawnCageCar clones) selects the driven pair by that order.
+       A cage whose wheel order differs will steer/drive the wrong
+       axle — the format carries no axle field, so this ordering
+       is part of the format contract.
+     - mountIdx has NO cage counterpart (the format has no mount
+       nodes): each wheel's mount is its nearest chassis node by
+       rest distance. step() splits tyre forces between wheel and
+       mount; with the mount being a real cage node the split works
+       as designed, but there is no dedicated strut beam unless the
+       cage itself beams the wheel to that node (strutBeam then
+       records it) — a cage without wheel-to-body beams will not
+       carry the body on its wheels at all, which is a cage
+       authoring issue, not something the importer can invent.
+     - steering geometry: step() steers by rotating the front
+       wheels' rolling direction by steerAngle around the car
+       frame — no per-wheel steering linkage exists in the
+       procedural cars either, so cage wheels steer identically.
+       What does NOT carry over: def-based geometry the cage
+       replaces implicitly — wheel contact in step() normally reads
+       def.wheelR; for cage cars it reads the per-wheel cage radius
+       (this._cageWheelR), and the skinning/section machinery
+       (secRings/secZ/gridS/gridP, buildSkinAnchors) has no cage
+       meaning and is left empty/zero. */
+  buildCageStructure(){
+    const cage = this.cageData, def = this.def;
+    const nodes = cage.nodes.map(cn=>({
+      pos:{x:0,y:0,z:0}, vel:{x:0,y:0,z:0},
+      rest:{x:cn.x, y:cn.y, z:cn.z},
+      mass:(cn.mass > 0 ? cn.mass : 1),
+      kind:cn.kind || 'chassis',
+      radius:(cn.radius !== undefined ? cn.radius : (cn.kind === 'wheel' ? def.wheelR : 0.06))
+    }));
+    this.nodes = nodes;
+    this.triangles = (cage.triangles || []).map(t=>({ a:t.a, b:t.b, c:t.c, collidable:!!t.collidable }));
+    this.gridS = 0; this.gridP = 0; this.secRings = []; this.secZ = [];
+    const wheelIdx = [];
+    if (cage.wheels && cage.wheels.length) for (const w of cage.wheels) wheelIdx.push(w.node);
+    else nodes.forEach((nd, i)=>{ if (nd.kind === 'wheel') wheelIdx.push(i); });
+    this.wheelIdx = wheelIdx.slice(0, 4);
+    while (this.wheelIdx.length < 4) this.wheelIdx.push(this.wheelIdx.length ? this.wheelIdx[0] : 0);
+    this._cageWheelR = [];
+    for (let w=0; w<4; w++){
+      const src = (cage.wheels && cage.wheels[w]) ? cage.wheels[w].radius : undefined;
+      this._cageWheelR.push(src !== undefined ? src : nodes[this.wheelIdx[w]].radius);
+    }
+    this.mountIdx = this.wheelIdx.map(wi=>{
+      let best = wi, bd = Infinity;
+      nodes.forEach((nd, i)=>{
+        if (nd.kind === 'wheel') return;
+        const dx = nd.rest.x-nodes[wi].rest.x, dy = nd.rest.y-nodes[wi].rest.y, dz = nd.rest.z-nodes[wi].rest.z;
+        const d = dx*dx + dy*dy + dz*dz;
+        if (d < bd){ bd = d; best = i; }
+      });
+      return best;
+    });
+    const rn = cage.refNodes || {};
+    this.frontBumper = (rn.front !== undefined ? rn.front : 0);
+    this.rearBumper = (rn.rear !== undefined ? rn.rear : 0);
+    this.frameTopIdx = (rn.top !== undefined ? rn.top : this.frontBumper);
+    this.frameFloorIdx = (rn.floor !== undefined ? rn.floor : this.rearBumper);
+    this.noseRefIdx = this.frontBumper;
+    const beams = [];
+    for (const cb of (cage.beams || [])){
+      const A = nodes[cb.a], B = nodes[cb.b];
+      if (!A || !B || cb.a === cb.b) continue;
+      const dx = B.rest.x-A.rest.x, dy = B.rest.y-A.rest.y, dz = B.rest.z-A.rest.z;
+      const d = Math.sqrt(dx*dx + dy*dy + dz*dz);
+      if (d < 1e-6) continue;
+      beams.push(new Beam(cb.a, cb.b, d, {
+        k:(cb.k !== undefined ? cb.k : def.stiff), c:cb.c || 0,
+        deformStrain:cb.deformStrain, breakStrain:cb.breakStrain,
+        kind:cb.kind || 'normal',
+        engage:(cb.engage !== undefined ? cb.engage : 0.85),
+        pressure:cb.pressure || 0,
+        mat:(cb.kind === 'support' ? 'frame' : 'panel')
+      }));
+    }
+    this.beams = beams;
+    this.strutBeam = [];
+    this.wheelIdx.forEach((wi, w)=>{
+      const mi = this.mountIdx[w];
+      const bi = beams.findIndex(b=> (b.a === wi && b.b === mi) || (b.a === mi && b.b === wi));
+      if (bi >= 0) this.strutBeam[w] = bi;
+    });
+    let zMax = -Infinity, zMin = Infinity;
+    for (const nd of nodes){ if (nd.rest.z > zMax) zMax = nd.rest.z; if (nd.rest.z < zMin) zMin = nd.rest.z; }
+    this.frontNodes = [this.frontBumper];
+    this.rearNodes = [this.rearBumper];
+    nodes.forEach((nd, i)=>{
+      if (nd.kind === 'wheel') return;
+      if (nd.rest.z >= zMax - 0.3 && nd.rest.y <= nodes[this.frontBumper].rest.y + 0.3 && i !== this.frontBumper) this.frontNodes.push(i);
+      if (nd.rest.z <= zMin + 0.3 && nd.rest.y <= nodes[this.rearBumper].rest.y + 0.3 && i !== this.rearBumper) this.rearNodes.push(i);
+    });
+    this.targetNodes = nodes.length;
+  }
+  /* ---------------- self-collision build (v2.7) ----------------
+     Until now the cage's nodes collided only with the world: in a
+     hard hit one panel could pass straight through another (roof
+     through floor, door through sill) because nothing ever pushed
+     two nodes of the SAME car apart. buildSelfCollision prepares
+     the pass that fixes that (selfCollide, called once per substep):
+     every chassis node gets a collision radius and a layer/group
+     (SC_GROUPS), and overlaps between nodes that are not
+     structurally tied together get resolved, so a fold has to
+     crumple — material stacking on material — instead of clipping.
+     Radius: 0.45 x the mean rest length of the node's LOCAL
+     beam-connected neighbours (its local spacing — see the
+     radius block below for the locality filter), clamped to
+     [0.05, 0.16] m — thick enough that two panels resting on each
+     other sit a believable panel-gap apart, thin enough that the
+     rest cage (whose unmasked pairs are all much farther apart
+     than the largest radii sum) never touches itself parked.
+     Masking: a pair never collides when the nodes are within 2
+     hops on the beam graph (they share a beam, or share a common
+     beam neighbour). That covers every structurally adjacent pair
+     — ring neighbours, chords, longitudinals, diagonals, links —
+     so the cage cannot fight its own structure; everything the
+     mask leaves is a genuine panel-on-panel approach. (The "same
+     panel group AND beam-neighbours" case is inside the mask by
+     construction: beam-neighbours are 1 hop.) A pair is ALSO
+     masked when it starts within 1.25x its radii sum at rest:
+     the strut mounts are placed within centimetres of the ring
+     nodes beside their wheel and tied to the cage by a link web
+     a few sections away, which leaves them 3-4 hops from nodes
+     they nearly coincide with — and the parked sag closes the
+     last few millimetres on the pairs just outside the sum, so
+     the whole hardpoint cluster (measured out to 1.04x the sum)
+     has to be inside the mask, with margin. A contact there
+     would fire forever at rest and fight the structure, and it
+     can never be a panel contact because the pair begins
+     overlapped. Genuine panel pairs all start well outside
+     1.25x their radii sum. The mask is stored as CSR sorted id
+     lists for allocation-free binary-search lookup in the hot
+     pass.
+     Broadphase buffers: a dense counting-sort grid over the
+     car's bounding box (the same pattern as step()'s obstacle
+     grid), rebuilt every substep into the preallocated typed
+     arrays below; the pair math runs on flat position/velocity
+     scratch arrays, never on node objects. */
+  buildSelfCollision(){
+    const nodes = this.nodes, beams = this.beams, def = this.def, n = nodes.length;
+    this.scEnabled = selfCollOpt.enabled && !this.noSelfColl;
+    this.scPairs = 0; this.scContacts = 0;
+    const group = new Int16Array(n), rad = new Float32Array(n);
+    const inSet = new Uint8Array(n);
+    // groups from rest position: section band first (front/rear
+    // clips), then — inside the cabin band — the height band and
+    // side, using the same height fraction zoneFor uses
+    const secOf = new Int32Array(n).fill(-1);
+    this.secRings.forEach((ids, i)=>{ for (const id of ids) secOf[id] = i; });
+    const rb = def.rideBoost || 0;
+    // cage cars: rest-frame ranges for the position-band fallback
+    let cgYMin = 0, cgYMax = 0, cgZMin = 0, cgZMax = 0;
+    if (this.cageData){
+      cgYMin = Infinity; cgYMax = -Infinity; cgZMin = Infinity; cgZMax = -Infinity;
+      for (const nd of nodes){
+        if (nd.rest.y < cgYMin) cgYMin = nd.rest.y; if (nd.rest.y > cgYMax) cgYMax = nd.rest.y;
+        if (nd.rest.z < cgZMin) cgZMin = nd.rest.z; if (nd.rest.z > cgZMax) cgZMax = nd.rest.z;
+      }
+    }
+    for (let i=0;i<n;i++){
+      const nd = nodes[i];
+      if (nd.kind === 'wheel'){ group[i] = SC_GROUPS.WHEEL; continue; }
+      inSet[i] = 1;
+      if (this.cageData){
+        // group by the cage's own group string where it names an
+        // SC_GROUPS layer; otherwise by rest-position band (front /
+        // rear by normalised z, then height band, then side) — the
+        // same scheme the procedural path applies via sections
+        if (i === this.frontBumper){ group[i] = SC_GROUPS.FRONT; continue; }
+        if (i === this.rearBumper){ group[i] = SC_GROUPS.REAR; continue; }
+        const gname = String((this.cageData.nodes[i].group || '')).toUpperCase();
+        if (gname && gname !== 'WHEEL' && SC_GROUPS[gname] !== undefined){ group[i] = SC_GROUPS[gname]; continue; }
+        const zn = (cgZMax - cgZMin) > 1e-6 ? (nd.rest.z - (cgZMin + cgZMax)*0.5)/((cgZMax - cgZMin)*0.5) : 0;
+        const hf = clamp((nd.rest.y - cgYMin)/Math.max(0.05, cgYMax - cgYMin), 0, 1);
+        if (zn > 0.68) group[i] = SC_GROUPS.FRONT;
+        else if (zn < -0.68) group[i] = SC_GROUPS.REAR;
+        else if (hf <= 0.38) group[i] = SC_GROUPS.FLOOR;
+        else if (hf >= 0.72) group[i] = SC_GROUPS.ROOF;
+        else if (nd.rest.x < -0.2) group[i] = SC_GROUPS.LEFT;
+        else if (nd.rest.x > 0.2) group[i] = SC_GROUPS.RIGHT;
+        else group[i] = SC_GROUPS.CABIN;
+        continue;
+      }
+      if (i === this.frontBumper){ group[i] = SC_GROUPS.FRONT; continue; }
+      if (i === this.rearBumper){ group[i] = SC_GROUPS.REAR; continue; }
+      const sec = secOf[i];
+      if (sec < 0){ group[i] = SC_GROUPS.FLOOR; continue; } // strut mounts: floor structure
+      const zf = this.secZ[sec], prof = profileAt(def, zf);
+      if (zf > 0.34){ group[i] = SC_GROUPS.FRONT; continue; }
+      if (zf < -0.34){ group[i] = SC_GROUPS.REAR; continue; }
+      const hf = clamp((nd.rest.y - (prof.yLow + rb))/Math.max(0.05, prof.yTop - prof.yLow - rb), 0, 1);
+      if (hf <= 0.38) group[i] = SC_GROUPS.FLOOR;
+      else if (hf >= 0.72) group[i] = SC_GROUPS.ROOF;
+      else if (nd.rest.x < -0.2) group[i] = SC_GROUPS.LEFT;
+      else if (nd.rest.x > 0.2) group[i] = SC_GROUPS.RIGHT;
+      else group[i] = SC_GROUPS.CABIN;
+    }
+    // radii from local spacing: 0.45x the mean rest length of the
+    // node's LOCAL incident beams — its non-support beams within
+    // 2x its shortest incident beam. The unfiltered mean over
+    // every incident beam measures the wrong thing on this cage:
+    // ring chords span a third of the section, skip-longitudinals
+    // span three sections, and the bumper/mount links span half
+    // a metre, so the plain mean saturates the 0.16 m clamp at
+    // every node and every resolution and the local spacing it
+    // is supposed to track disappears (measured: radius range
+    // [0.160, 0.160] across the whole sedan @500). The locality
+    // filter keeps the surface beams — ring edges, longitudinals,
+    // panel diagonals, the node's actual cell size — and drops
+    // the long bracing, so the radius tracks the grid: ~0.16 m
+    // on the coarse cage, ~0.06-0.08 m on the fine ones.
+    const minL = new Float64Array(n).fill(Infinity);
+    for (const b of beams){
+      if (b.kind === 'support') continue;
+      if (b.rest < minL[b.a]) minL[b.a] = b.rest;
+      if (b.rest < minL[b.b]) minL[b.b] = b.rest;
+    }
+    const sum = new Float64Array(n), cnt = new Int32Array(n);
+    for (const b of beams){
+      if (b.kind === 'support') continue;
+      if (b.rest <= 2*minL[b.a]){ sum[b.a] += b.rest; cnt[b.a]++; }
+      if (b.rest <= 2*minL[b.b]){ sum[b.b] += b.rest; cnt[b.b]++; }
+    }
+    let rMax = 0;
+    for (let i=0;i<n;i++){
+      if (!inSet[i]) continue;
+      const mean = cnt[i] > 0 ? sum[i]/cnt[i] : (isFinite(minL[i]) ? minL[i] : 0.22);
+      rad[i] = clamp(0.45*mean, 0.05, 0.16);
+      if (rad[i] > rMax) rMax = rad[i];
+    }
+    if (this.cageData){
+      // cage cars take their collision radii from the cage itself
+      // (per-node radius in the format), not from beam spacing
+      rMax = 0;
+      for (let i=0;i<n;i++){
+        if (!inSet[i]) continue;
+        const cr = this.cageData.nodes[i].radius;
+        rad[i] = clamp(cr !== undefined ? cr : nodes[i].radius, 0.03, 0.30);
+        if (rad[i] > rMax) rMax = rad[i];
+      }
+    }
+    this._scGroup = group; this._scRad = rad; this._scInSet = inSet;
+    this._scRMax = rMax;
+    // two-tier broadphase split (perf): the radius distribution is
+    // bimodal at fine grids — nearly every node sits at the small
+    // clamp while a handful of hardpoint nodes (mounts, bumpers)
+    // carry the 0.16 m cap. A single grid must use cell = 2x the
+    // LARGEST radius for everyone, which makes the neighbour search
+    // volume ~10x the typical pair's interaction volume and the
+    // pair loop ~5x the rest of the substep. So nodes over 0.10 m
+    // go to a short brute-force list (checked against every set
+    // member) and the grid cell keys off the largest REMAINING
+    // radius. At coarse grids every node is large, the list stays
+    // empty and the pass is exactly the single-tier original.
+    {
+      let rGrid = 0; const big = [];
+      for (let i=0;i<n;i++){
+        if (!inSet[i]) continue;
+        if (rad[i] > 0.10) big.push(i);
+        else if (rad[i] > rGrid) rGrid = rad[i];
+      }
+      if (big.length && rGrid > 0){ this._scBig = big; this._scRGrid = rGrid; }
+      else { this._scBig = []; this._scRGrid = rMax; }
+      this._scIsBig = new Uint8Array(n);
+      for (const i of this._scBig) this._scIsBig[i] = 1;
+    }
+    // beam-graph adjacency (all beams, supports included: a support
+    // pair is structurally tied even though it carries no standing
+    // force)
+    const adjOff = new Int32Array(n+1);
+    for (const b of beams){ adjOff[b.a+1]++; adjOff[b.b+1]++; }
+    for (let i=0;i<n;i++) adjOff[i+1] += adjOff[i];
+    const adj = new Int32Array(adjOff[n]);
+    { const cur = adjOff.slice(0, n);
+      for (const b of beams){ adj[cur[b.a]++] = b.b; adj[cur[b.b]++] = b.a; } }
+    // 2-hop mask per node (self + neighbours + neighbours of
+    // neighbours), sorted and deduped via a stamp array
+    const stamp = new Int32Array(n).fill(-1);
+    const maskOff = new Int32Array(n+1);
+    const lists = new Array(n);
+    for (let i=0;i<n;i++){
+      const set = [i];
+      stamp[i] = i;
+      for (let e=adjOff[i]; e<adjOff[i+1]; e++){
+        const j = adj[e];
+        if (stamp[j] !== i){ stamp[j] = i; set.push(j); }
+        for (let e2=adjOff[j]; e2<adjOff[j+1]; e2++){
+          const k = adj[e2];
+          if (stamp[k] !== i){ stamp[k] = i; set.push(k); }
+        }
+      }
+      set.sort((x, y)=>x-y);
+      lists[i] = set;
+    }
+    // rest-overlap mask (see the header comment): pairs that begin
+    // within 1.25x their radii sum — the mount hardpoint clusters —
+    // are masked as well. Build-time O(n^2) with axis pre-rejects;
+    // the pairs are rare, so the membership checks stay cheap.
+    for (let i=0;i<n;i++){
+      if (!inSet[i]) continue;
+      const A = nodes[i].rest, ri = rad[i];
+      for (let j=i+1;j<n;j++){
+        if (!inSet[j]) continue;
+        const rs = (ri + rad[j])*1.25, B = nodes[j].rest;
+        const dx = B.x-A.x; if (dx >= rs || dx <= -rs) continue;
+        const dy = B.y-A.y; if (dy >= rs || dy <= -rs) continue;
+        const dz = B.z-A.z; if (dz >= rs || dz <= -rs) continue;
+        if (dx*dx + dy*dy + dz*dz >= rs*rs) continue;
+        if (!lists[i].includes(j)) lists[i].push(j);
+        if (!lists[j].includes(i)) lists[j].push(i);
+      }
+    }
+    let total = 0;
+    for (let i=0;i<n;i++){ lists[i].sort((x, y)=>x-y); total += lists[i].length; }
+    const maskIds = new Int32Array(total);
+    let w = 0;
+    for (let i=0;i<n;i++){ maskOff[i] = w; const s = lists[i]; for (let q=0;q<s.length;q++) maskIds[w++] = s[q]; }
+    maskOff[n] = w;
+    this._scMaskOff = maskOff; this._scMaskIds = maskIds;
+    // bitset copy of the same mask for the hot pair loop: the CSR
+    // binary search (_scMasked) costs ~7 dependent loads per
+    // candidate pair and there are ~700 candidates per substep at
+    // 500 nodes — measured, that lookup alone was most of the
+    // pass's cost. One word load + bit test replaces it; the CSR
+    // lists stay as the canonical form _scMasked reads.
+    const MW = Math.ceil(n/32);
+    const maskBits = new Uint32Array(n*MW);
+    for (let i=0;i<n;i++){ const s = lists[i]; for (let q=0;q<s.length;q++){ const j = s[q]; maskBits[i*MW + (j>>5)] |= (1 << (j & 31)); } }
+    this._scMaskBits = maskBits; this._scMaskWords = MW;
+    // broadphase buffers (see selfCollide): flat position/velocity
+    // scratch, inverse masses, and the counting-sort grid arrays,
+    // all preallocated — the pass allocates nothing
+    this._scPos = new Float64Array(n*3);
+    this._scVel = new Float64Array(n*3);
+    this._scInvM = new Float64Array(n);
+    for (let i=0;i<n;i++) if (inSet[i]) this._scInvM[i] = 1/nodes[i].mass;
+    this._scTick = 0; this._scHotT = 0;
+    this._scCounts = new Int32Array(SC_GRID_MAX + 1);
+    this._scCursor = new Int32Array(SC_GRID_MAX + 1);
+    this._scOcc = new Int32Array(SC_GRID_MAX);
+    this._scOrder = new Int32Array(n);
+    this._scCellOf = new Int32Array(n);
+  }
+  _scMasked(i, j){
+    const off = this._scMaskOff, ids = this._scMaskIds;
+    let lo = off[i], hi = off[i+1]-1;
+    while (lo <= hi){
+      const mid = (lo + hi) >> 1, v = ids[mid];
+      if (v === j) return true;
+      if (v < j) lo = mid + 1; else hi = mid - 1;
+    }
+    return false;
+  }
   /* pose helpers */
   setPoseFrame(cx, cy, cz, right, up, fwd, vx, vy, vz){
     this.asleep = false; this._quietT = 0; // a teleport always wakes the car
@@ -1552,7 +1952,8 @@ class SoftBodyCar {
     for (const b of this.beams){ if (b.broken) broken++; else if (b.deformed) deformed++; else intact++; }
     const total = this.beams.length;
     return { intact:intact, deformed:deformed, broken:broken, total:total,
-             integrity: Math.round(100*(intact + deformed*0.55)/total) };
+             integrity: Math.round(100*(intact + deformed*0.55)/total),
+             scPairs: this.scPairs, scContacts: this.scContacts };
   }
   repair(){
     this.asleep = false; this._quietT = 0; // repair always wakes the car
@@ -1610,6 +2011,213 @@ class SoftBodyCar {
         vB.x -= ux*rel*wB; vB.y -= uy*rel*wB; vB.z -= uz*rel*wB;
       }
     }
+  }
+  /* ---------------- self-collision pass (v2.7) ----------------
+     Runs ONCE per 480 Hz substep (not per beam subcycle), after
+     the beam displacement limits and before flex damping, so
+     contact jitter is smoothed by the same pass that kills the
+     shell wobble. Broadphase: the car's own nodes are sorted
+     into a dense grid over the car's bounding box by counting
+     sort (the pattern step() uses for obstacles), with the cell
+     at least the largest interaction distance (2x the largest
+     radius), so the 13 forward neighbour cells plus the cell
+     itself cover every pair that can interact, and each
+     unordered pair is visited exactly once. If a scattered
+     wreck's box outgrows the preallocated counts array the cell
+     grows until it fits — completeness is preserved, since the
+     cell only has to stay >= the interaction distance. The pair
+     math runs directly on the node objects (their pos/vel refs
+     are fetched once per outer node; resolves are Gauss-Seidel,
+     so a node moved by one contact is seen moved by the next);
+     nothing in the pass allocates. Narrowphase: pairs inside
+     their radii sum and outside the 2-hop mask resolve as a soft
+     contact — 55% of the overlap projected out per substep,
+     split by inverse mass (at 480 Hz the rest closes within a
+     few substeps, and the soft factor keeps a panel resting on
+     another panel from jittering), plus damping of the approach
+     velocity along the contact normal. There is no restitution
+     and no tangential force: the pass can only remove energy,
+     never add it, so a contact at rest stays at rest and a
+     parked car registers zero contacts.
+     scPairs counts candidate pairs distance-checked, scContacts
+     counts contacts actually resolved; both are cumulative and
+     surfaced through stats(). */
+  selfCollide(){
+    if (!this.scEnabled) return;
+    // cadence (perf): the full pass runs every 2nd substep (240 Hz)
+    // while the car is contact-free — two panels of the same car
+    // approach at panel-relative speeds (a few m/s, not road speed),
+    // so in 1/240 s a pair closes at most a few centimetres, far
+    // inside the smallest radii sum, and nothing can tunnel between
+    // checks. The moment a pass resolves a contact the pass goes
+    // HOT — every substep — for 0.25 s, so a crash fold in progress
+    // is resolved at the full 480 Hz rate. Measured: the pass is
+    // ~165 us at 500 nodes; at half cadence its amortised cost is
+    // inside the +15% perf bar against the pre-self-collision core,
+    // at full cadence it was not.
+    if (this._scHotT > 0) this._scHotT--;
+    else { this._scTick++; if (this._scTick & 1) return; }
+    const nodes = this.nodes, n = nodes.length;
+    const rad = this._scRad, inSet = this._scInSet, invM = this._scInvM;
+    const P = this._scPos, V = this._scVel;
+    const maskBits = this._scMaskBits, MW = this._scMaskWords;
+    // bounding box of the set members (anchors the grid)
+    let mnx = Infinity, mny = Infinity, mnz = Infinity,
+        mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+    for (let i=0;i<n;i++){
+      if (!inSet[i]) continue;
+      const p = nodes[i].pos;
+      if (p.x < mnx) mnx = p.x; if (p.x > mxx) mxx = p.x;
+      if (p.y < mny) mny = p.y; if (p.y > mxy) mxy = p.y;
+      if (p.z < mnz) mnz = p.z; if (p.z > mxz) mxz = p.z;
+    }
+    if (mxx === -Infinity) return; // no set members (cannot happen)
+    let cell = Math.max(0.17, this._scRGrid*2);
+    let dxn = 0, dyn = 0, dzn = 0;
+    for (;;){
+      dxn = Math.floor((mxx-mnx)/cell) + 1;
+      dyn = Math.floor((mxy-mny)/cell) + 1;
+      dzn = Math.floor((mxz-mnz)/cell) + 1;
+      if (dxn*dyn*dzn <= SC_GRID_MAX) break;
+      cell *= 1.26;
+    }
+    const ncells = dxn*dyn*dzn, dxy = dxn*dyn;
+    const counts = this._scCounts, cursor = this._scCursor,
+          occ = this._scOcc, order = this._scOrder, cellOf = this._scCellOf;
+    counts.fill(0, 0, ncells);
+    const inv = 1/cell;
+    const isBig = this._scIsBig;
+    for (let i=0;i<n;i++){
+      if (!inSet[i] || isBig[i]) continue;
+      const p = nodes[i].pos;
+      let ix = Math.floor((p.x-mnx)*inv); if (ix >= dxn) ix = dxn-1;
+      let iy = Math.floor((p.y-mny)*inv); if (iy >= dyn) iy = dyn-1;
+      let iz = Math.floor((p.z-mnz)*inv); if (iz >= dzn) iz = dzn-1;
+      const c = ix + dxn*(iy + dyn*iz);
+      cellOf[i] = c; counts[c]++;
+    }
+    let run = 0, nocc = 0;
+    for (let c=0;c<ncells;c++){
+      const k = counts[c]; counts[c] = run; run += k;
+      if (k > 0) occ[nocc++] = c;
+    }
+    counts[ncells] = run;
+    cursor.set(counts.subarray(0, ncells+1));
+    for (let i=0;i<n;i++){
+      if (!inSet[i] || isBig[i]) continue;
+      order[cursor[cellOf[i]]++] = i;
+    }
+    // fill the flat scratch arrays from the live nodes (set members
+    // only — the pair loop and the write-back below touch exactly
+    // this set, so non-set nodes, i.e. the wheels, are never read
+    // from stale scratch and never clobbered by the write-back)
+    for (let i=0;i<n;i++){
+      if (!inSet[i]) continue;
+      const nd = nodes[i], i3 = i*3;
+      P[i3] = nd.pos.x; P[i3+1] = nd.pos.y; P[i3+2] = nd.pos.z;
+      V[i3] = nd.vel.x; V[i3+1] = nd.vel.y; V[i3+2] = nd.vel.z;
+    }
+    // pair iteration over occupied cells: self + 13 forward
+    // neighbours, each unordered pair exactly once
+    let pairs = 0, contacts = 0;
+    for (let oi=0; oi<nocc; oi++){
+      const C = occ[oi];
+      const cz = Math.floor(C/dxy), rem = C - cz*dxy,
+            cy = Math.floor(rem/dxn), cx = rem - cy*dxn;
+      const a0 = counts[C], a1 = counts[C+1];
+      for (let o=-1; o<13; o++){
+        let C2, b0, b1;
+        if (o < 0){ C2 = C; b0 = a0; b1 = a1; }
+        else {
+          const off = SC_FWD[o];
+          const nx = cx+off[0], ny = cy+off[1], nz = cz+off[2];
+          if (nx < 0 || ny < 0 || nz < 0 || nx >= dxn || ny >= dyn || nz >= dzn) continue;
+          C2 = nx + dxn*(ny + dyn*nz);
+          b0 = counts[C2]; b1 = counts[C2+1];
+          if (b0 === b1) continue;
+        }
+        for (let a=a0; a<a1; a++){
+          const i = order[a], i3 = i*3;
+          const ri = rad[i], imI = invM[i];
+          for (let b = (o < 0 ? a+1 : b0); b<b1; b++){
+            const j = order[b], j3 = j*3;
+            const rs = ri + rad[j];
+            // P is read live (not snapshotted): an earlier resolve
+            // in this same pass may already have moved node i, and
+            // the contact math must see the current position
+            const dx = P[j3]-P[i3]; if (dx >= rs || dx <= -rs) continue;
+            const dy = P[j3+1]-P[i3+1]; if (dy >= rs || dy <= -rs) continue;
+            const dz = P[j3+2]-P[i3+2]; if (dz >= rs || dz <= -rs) continue;
+            pairs++;
+            if (maskBits[i*MW + (j>>5)] & (1 << (j & 31))) continue;
+            const d2 = dx*dx + dy*dy + dz*dz;
+            if (d2 >= rs*rs) continue;
+            contacts++;
+            const d = Math.sqrt(d2);
+            let ux, uy, uz, pen;
+            if (d > 1e-9){ ux = dx/d; uy = dy/d; uz = dz/d; pen = rs - d; }
+            else { ux = 1; uy = 0; uz = 0; pen = rs; } // coincident nodes: arbitrary axis
+            const imJ = invM[j], imSum = imI + imJ;
+            const wI = imI/imSum, wJ = imJ/imSum;
+            const corr = pen*0.55;
+            P[i3] -= ux*corr*wI; P[i3+1] -= uy*corr*wI; P[i3+2] -= uz*corr*wI;
+            P[j3] += ux*corr*wJ; P[j3+1] += uy*corr*wJ; P[j3+2] += uz*corr*wJ;
+            const vn = (V[j3]-V[i3])*ux + (V[j3+1]-V[i3+1])*uy + (V[j3+2]-V[i3+2])*uz;
+            if (vn < 0){
+              const lam = -vn*0.5;
+              V[i3] -= ux*lam*wI; V[i3+1] -= uy*lam*wI; V[i3+2] -= uz*lam*wI;
+              V[j3] += ux*lam*wJ; V[j3+1] += uy*lam*wJ; V[j3+2] += uz*lam*wJ;
+            }
+          }
+        }
+      }
+    }
+    // big-radius tier: each large node against every set member
+    // (big-big pairs once, by list order). Same contact math as
+    // the grid tier, on the same live P/V scratch.
+    const bigList = this._scBig;
+    for (let bi=0; bi<bigList.length; bi++){
+      const i = bigList[bi], i3 = i*3;
+      const ri = rad[i], imI = invM[i];
+      for (let j=0;j<n;j++){
+        if (!inSet[j] || j === i) continue;
+        if (isBig[j] && j < i) continue; // big-big already done from the smaller index
+        const j3 = j*3;
+        const rs = ri + rad[j];
+        const dx = P[j3]-P[i3]; if (dx >= rs || dx <= -rs) continue;
+        const dy = P[j3+1]-P[i3+1]; if (dy >= rs || dy <= -rs) continue;
+        const dz = P[j3+2]-P[i3+2]; if (dz >= rs || dz <= -rs) continue;
+        pairs++;
+        if (maskBits[i*MW + (j>>5)] & (1 << (j & 31))) continue;
+        const d2 = dx*dx + dy*dy + dz*dz;
+        if (d2 >= rs*rs) continue;
+        contacts++;
+        const d = Math.sqrt(d2);
+        let ux, uy, uz, pen;
+        if (d > 1e-9){ ux = dx/d; uy = dy/d; uz = dz/d; pen = rs - d; }
+        else { ux = 1; uy = 0; uz = 0; pen = rs; }
+        const imJ = invM[j], imSum = imI + imJ;
+        const wI = imI/imSum, wJ = imJ/imSum;
+        const corr = pen*0.55;
+        P[i3] -= ux*corr*wI; P[i3+1] -= uy*corr*wI; P[i3+2] -= uz*corr*wI;
+        P[j3] += ux*corr*wJ; P[j3+1] += uy*corr*wJ; P[j3+2] += uz*corr*wJ;
+        const vn = (V[j3]-V[i3])*ux + (V[j3+1]-V[i3+1])*uy + (V[j3+2]-V[i3+2])*uz;
+        if (vn < 0){
+          const lam = -vn*0.5;
+          V[i3] -= ux*lam*wI; V[i3+1] -= uy*lam*wI; V[i3+2] -= uz*lam*wI;
+          V[j3] += ux*lam*wJ; V[j3+1] += uy*lam*wJ; V[j3+2] += uz*lam*wJ;
+        }
+      }
+    }
+    // write back
+    for (let i=0;i<n;i++){
+      if (!inSet[i]) continue;
+      const nd = nodes[i], i3 = i*3;
+      nd.pos.x = P[i3]; nd.pos.y = P[i3+1]; nd.pos.z = P[i3+2];
+      nd.vel.x = V[i3]; nd.vel.y = V[i3+1]; nd.vel.z = V[i3+2];
+    }
+    this.scPairs += pairs; this.scContacts += contacts;
+    if (contacts > 0) this._scHotT = 120; // 0.25 s at 480 Hz
   }
   // velocity-level flex damping — the jelly killer. Force-based beam
   // damping cannot finish this job: its ratio is capped by the 480 Hz
@@ -1948,7 +2556,8 @@ class SoftBodyCar {
       // window still covers the ~15 m bound with margin), under
       // half the scan. The public groundHeight keeps 140 m.
       const gh = ghS; world._groundHeightInto(n.pos.x, n.pos.z, this.sHint, gh, gh.normal, 20);
-      const contact = (n.pos.y - gh.h) <= def.wheelR + 0.07;
+      const wRad = this._cageWheelR ? this._cageWheelR[w] : def.wheelR;
+      const contact = (n.pos.y - gh.h) <= wRad + 0.07;
       this['contact'+w] = contact;
       if (!contact){
         // airborne: the tire only cools (half rate — no slip heat,
@@ -2076,7 +2685,7 @@ class SoftBodyCar {
       const util = clamp(Math.sqrt(gx*gx + gy*gy + gz*gz + fLongMag*fLongMag)/(mu*load), 0, 1.2);
       const Tn = this.tireTemp[w] + (def.tireHeat * slipSpd * util - (this.tireTemp[w]-TIRE_AMBIENT) * def.tireCool) * h;
       this.tireTemp[w] = Tn < 5 ? 5 : (Tn > 160 ? 160 : Tn);
-      this.wheelSpin[w] += (vF/def.wheelR)*h;
+      this.wheelSpin[w] += (vF/wRad)*h;
     }
     // aero drag (on the shared center velocity, spread over nodes)
     const spd = Math.sqrt(cvX*cvX+cvY*cvY+cvZ*cvZ);
@@ -2106,6 +2715,9 @@ class SoftBodyCar {
     // hard beam displacement limit, applied after the beams have moved
     // the nodes and before contacts resolve — see enforceBeamLimits
     this.enforceBeamLimits();
+    // self-collision: panels of this same car may not pass through
+    // each other — once per substep, see selfCollide
+    this.selfCollide();
     // velocity-level flex damping (jelly control), gated off while a
     // crash impact is in progress — see dampFlex
     this.dampFlex(h);
@@ -2351,13 +2963,40 @@ function spawnCar(defId, world, s){
   car.setVelocity(0,0,0);
   return car;
 }
+/* spawn a CageData car (v2.7): the def is a clone of the sedan's
+   (drive layout, power, drag, tire model — the cage format carries
+   none of those) with the cage's total mass and first wheel radius
+   substituted; the structure itself comes entirely from the cage.
+   Placement and the quasi-static settle mirror spawnCar exactly. */
+function spawnCageCar(cage, world, s){
+  const base = CAR_DEFS[0];
+  const def = Object.assign({}, base, {
+    id:'cage-' + (cage.name || 'car'), name:cage.name || base.name,
+    mass:(cage.totalMass > 0 ? cage.totalMass : base.mass)
+  });
+  if (cage.wheels && cage.wheels.length && cage.wheels[0].radius) def.wheelR = cage.wheels[0].radius;
+  const car = new SoftBodyCar(def, world, cage.nodes.length, { cage:cage });
+  car.placeOnTrack(world, (s===undefined?100:s), 0);
+  car.noDeform = true;
+  car._noSleep = true;
+  const idle = { throttle:0, reverse:0, brake:0, steer:0, handbrake:0 };
+  for (let i=0;i<150;i++){
+    car.step(1/60, idle, world);
+    if (i%6 === 5) car.setVelocity(0,0,0);
+  }
+  car.noDeform = false;
+  car._noSleep = false;
+  car.setVelocity(0,0,0);
+  return car;
+}
 if (typeof globalThis !== 'undefined'){
   globalThis.__SIM = { TrackWorld:TrackWorld, SoftBodyCar:SoftBodyCar, Beam:Beam, CAR_DEFS:CAR_DEFS,
-    spawnCar:spawnCar, ROAD_HALF:ROAD_HALF, CLIFF_FIRST:CLIFF_FIRST, CLIFF_PERIOD:CLIFF_PERIOD, CLIFF_LEN:CLIFF_LEN,
+    spawnCar:spawnCar, spawnCageCar:spawnCageCar, ROAD_HALF:ROAD_HALF, CLIFF_FIRST:CLIFF_FIRST, CLIFF_PERIOD:CLIFF_PERIOD, CLIFF_LEN:CLIFF_LEN,
     RES_TARGET_DEFAULT:RES_TARGET_DEFAULT, resNameFor:resNameFor, profileAt:profileAt,
     chooseGrid:chooseGrid, ringPoints:ringPoints, carRes:carRes, BARRIER_LAT:BARRIER_LAT,
     MATERIALS:MATERIALS, zoneFor:zoneFor, TIRE_AMBIENT:TIRE_AMBIENT, tireGripFactor:tireGripFactor,
     beamAxialForce:beamAxialForce, dampAlpha:dampAlpha, dampFilterStep:dampFilterStep, DAMP_CUTOFF_HZ:DAMP_CUTOFF_HZ, supportOpt:supportOpt,
+    selfCollOpt:selfCollOpt, SC_GROUPS:SC_GROUPS,
     buildSkinAnchors:buildSkinAnchors, skinPositions:skinPositions, triBasis:triBasis, patchFrame:patchFrame };
 }
 // === SIM CORE END ===
