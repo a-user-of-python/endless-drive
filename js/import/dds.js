@@ -56,6 +56,6 @@ function decodeDDS(bytes){
   }
   return { width:width, height:height, data:data, mipCount:mipCount, format:fourCC.trim()||'RGB32' };
 }
-const API = { decodeDDS:decodeDDS };
+{ const API = { decodeDDS:decodeDDS };
 if (typeof globalThis!=='undefined') globalThis.__DDS = API;
-if (typeof module!=='undefined') module.exports = API;
+if (typeof module!=='undefined') module.exports = API; }
