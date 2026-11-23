@@ -1847,5 +1847,320 @@ test('46 CageData car body: parked self-collision clean (zero contacts, settled)
     ' in 3 s parked, maxSpeed ' + ms.toFixed(3) + ', up.y ' + car.frame().up.y.toFixed(2);
 });
 
+/* 47-50 — v2.7.1: overstretch clamp + strain stiffening (defect:
+   "nodes can outstretch way past what they should be able to") and
+   the self-collision quad-centre hole (defect: "in some spots there
+   is still no self collision"). Before-numbers, measured with the
+   shipped v2.7 core on this same harness (per-substep sampling):
+   sedan @150 wall crash peak tensile 1.946x (a support beam —
+   supports had breakStrain 50, hence no clamp and no break),
+   settled max 1.911x; @500 peak 1.725x, peak compressive 0.093x.
+   The fix: the positional clamp is capped at clampDisp =
+   min(breakStrain, 0.55) x rest for EVERY beam, runs again at the
+   end of the substep (contact resolves run after the mid-substep
+   clamp and used to re-open the bound), tension stiffens +2x k
+   past 1.30x rest, and stretched beams (> 1.15x) grow midpoint
+   pseudo-particles in the self-collision pass. */
+function strainTrack(car, world, seconds) {
+  // step at the substep rate, tracking peak unbroken strains
+  let peakT = 0, peakC = Infinity, peakSup = 0;
+  const steps = Math.round(seconds * 480);
+  for (let s = 0; s < steps; s++) {
+    car.step(1 / 480, NO_INPUT, world);
+    for (const b of car.beams) {
+      if (b.broken) continue;
+      const d = distNodes(car, b.a, b.b) / b.rest;
+      if (d > peakT) peakT = d;
+      if (d < peakC) peakC = d;
+      if (b.kind === 'support' && d > peakSup) peakSup = d;
+    }
+    if (s > 480 && car.speed() < 0.5) break;
+  }
+  let settled = 0;
+  for (const b of car.beams) {
+    if (b.broken) continue;
+    const d = distNodes(car, b.a, b.b) / b.rest;
+    if (d > settled) settled = d;
+  }
+  return { peakT, peakC, peakSup, settled };
+}
+test('47 overstretch: wall-crash strains bounded @150 and @500 (v2.7.1)', () => {
+  const infos = [];
+  for (const target of [150, 500]) {
+    const { world, car } = crashSetup('sedan', 27.78, target);
+    const r = strainTrack(car, world, 5);
+    assert(!car.hasNaN(), 'NaN @' + target);
+    assert(r.peakT <= 1.65, '@' + target + ' peak tensile strain ' + r.peakT.toFixed(3) + 'x (v2.7: ' + (target === 150 ? '1.946' : '1.725') + 'x)');
+    assert(r.settled <= 1.45, '@' + target + ' settled max strain ' + r.settled.toFixed(3) + 'x (v2.7: ' + (target === 150 ? '1.911' : '1.290') + 'x)');
+    assert(r.peakC >= 0.33, '@' + target + ' peak compressive strain ' + r.peakC.toFixed(3) + 'x (v2.7: ' + (target === 150 ? '0.247' : '0.093') + 'x)');
+    assert(r.peakSup <= 1.65, '@' + target + ' support beams peaked at ' + r.peakSup.toFixed(3) + 'x — supports were the worst offenders in v2.7 (1.946x)');
+    infos.push('@' + target + ' peakT ' + r.peakT.toFixed(2) + 'x settled ' + r.settled.toFixed(2) + 'x peakC ' + r.peakC.toFixed(2) + 'x supports ' + r.peakSup.toFixed(2) + 'x');
+  }
+  return infos.join('; ');
+});
+
+/* 48 — the quad-centre hole: two CageData panels, the target panel
+   authored fine (@500-style: 0.17 m spacing, 0.075 m radii) and
+   scaled x1.45, the state a panel reaches in a crash. Its quad
+   centres sit 0.175 m from every corner — outside the 0.15 m
+   node-node radii sum — so with the v2.7 pass 7 of 8 centre-aimed
+   door nodes passed clean through at 5-10 m/s.
+   AUTHORING (round 2): the scale is applied to the cabin's cage
+   positions BEFORE spawn, so the beam rests derive from the
+   scaled geometry and the panel is strain-free at 1.45x. The
+   original version stretched the live panel in place; that
+   worked until the v2.7.1 clamp cap (every unbroken beam is
+   positionally bounded to 1.55x rest) landed — the clamp
+   correctly projected the authored 1.76x stretch back under
+   1.55x in the first substep, the hole closed, and the CONTROL
+   stopped showing it (0/8 through). 1.45x is chosen inside the
+   honest window: above 1.24x (0.15 / (0.71 x 0.17)) the centre
+   hole is open, below the 1.55x clamp cap a real panel can
+   actually hold it. The door is authored at the same scale (its
+   aim points are the cabin's quad centres); the cabin nodes are
+   heavy with soft unbreakable beams so the panel holds its shape
+   compliantly for the ~0.1 s of the test. With the beam-midpoint
+   pseudo-particles the aimed through-count drops to <=3 of 8;
+   the control run (pass disabled) must still show the hole. */
+function slamRigCage() {
+  const nodes = [], beams = [];
+  const add = (x, y, z, g, r) => { nodes.push({ x, y, z, mass: 25, group: g, kind: 'chassis', radius: r, frictionCoef: 0.8 }); return nodes.length - 1; };
+  const ys = [], zs = [];
+  for (let i = 0; i < 3; i++) ys.push(0.55 + i * 0.17);
+  for (let i = 0; i < 5; i++) zs.push(-2 * 0.17 + i * 0.17);
+  const cabin = {}, door = {};
+  for (const y of ys) for (const z of zs) cabin[y + ',' + z] = add(0, y, z, 'cabin', 0.075);
+  for (const y of ys) for (const z of zs) door[y + ',' + z] = add(0.55, y + 0.085, z + 0.085, 'left', 0.075);
+  const grid = (map) => {
+    for (let iy = 0; iy < 3; iy++) for (let iz = 0; iz < 5; iz++) {
+      const id = map[ys[iy] + ',' + zs[iz]];
+      if (iz < 4) beams.push(cageBeam(id, map[ys[iy] + ',' + zs[iz + 1]], 250000, 2200));
+      if (iy < 2) beams.push(cageBeam(id, map[ys[iy + 1] + ',' + zs[iz]], 250000, 2200));
+      if (iz < 4 && iy < 2) {
+        beams.push(cageBeam(id, map[ys[iy + 1] + ',' + zs[iz + 1]], 250000, 2200));
+        beams.push(cageBeam(map[ys[iy + 1] + ',' + zs[iz]], map[ys[iy] + ',' + zs[iz + 1]], 250000, 2200));
+      }
+    }
+  };
+  grid(cabin); grid(door);
+  const wheels = [];
+  for (const [wx, wz] of [[-0.8, 1.05], [0.8, 1.05], [-0.8, -1.05], [0.8, -1.05]]) {
+    nodes.push({ x: wx, y: 0.33, z: wz, mass: 13, group: 'wheel', kind: 'wheel', radius: 0.33, frictionCoef: 1.0 });
+    wheels.push({ node: nodes.length - 1, radius: 0.33 });
+  }
+  for (const w of wheels) {
+    const wn = nodes[w.node];
+    const scored = [];
+    for (const k in cabin) { const cn = nodes[cabin[k]]; scored.push([(cn.x - wn.x) ** 2 + (cn.z - wn.z) ** 2, cabin[k]]); }
+    scored.sort((a, b) => a[0] - b[0]);
+    for (let q = 0; q < 3; q++) beams.push(cageBeam(w.node, scored[q][1], 60000, 1500, 0.3, 0.75));
+  }
+  const doorIds = Object.values(door), cabinIds = Object.values(cabin);
+  const cAt = (iy, iz) => cabin[ys[iy] + ',' + zs[iz]];
+  return { cage: { name: 'slamrig', nodes, beams, triangles: [{ a: cabinIds[0], b: cabinIds[1], c: cabinIds[2], collidable: true }],
+                   wheels, refNodes: { front: cAt(1, 4), rear: cAt(1, 0), top: cAt(2, 2), floor: wheels[0].node },
+                   totalMass: nodes.reduce((s, n) => s + n.mass, 0) },
+           doorIds, cabinIds };
+}
+function runSlam(speed, enabled, builder, scF) {
+  const SIM = globalThis.__SIM;
+  const { cage, doorIds, cabinIds } = (builder || slamRigCage)();
+  const cset = new Set(cabinIds), dset = new Set(doorIds);
+  const sc = scF !== undefined ? scF : 1.45;
+  // both panels scaled in the CAGE about the cabin centroid
+  // (y 0.72 / z 0): beam rests derive from the scaled positions
+  // at spawn, so the geometry is strain-free at the authored
+  // scale (see the test 48 header for why the stretch is no
+  // longer applied to the live car)
+  cage.nodes.forEach((nd, i) => { if (dset.has(i) || cset.has(i)) { nd.y = 0.72 + (nd.y - 0.72) * sc; nd.z = nd.z * sc; } });
+  cage.nodes.forEach((nd, i) => { if (cset.has(i)) nd.mass = 400; });
+  for (const b of cage.beams) if (cset.has(b.a) && cset.has(b.b)) { b.k = 20000; b.c = 2000; b.breakStrain = 50; b.deformStrain = 10; }
+  cage.totalMass = cage.nodes.reduce((s, n) => s + n.mass, 0);
+  const world = new TrackWorld(1337);
+  const car = SIM.spawnCageCar(cage, world, 100);
+  if (!enabled) car.scEnabled = false;
+  const cen = idl => { let x = 0, y = 0, z = 0; for (const i of idl) { x += car.nodes[i].pos.x; y += car.nodes[i].pos.y; z += car.nodes[i].pos.z; } return { x: x / idl.length, y: y / idl.length, z: z / idl.length }; };
+  const dc = cen(doorIds), cc2 = cen(cabinIds);
+  let ax = cc2.x - dc.x, ay = cc2.y - dc.y, az = cc2.z - dc.z;
+  const al = Math.sqrt(ax * ax + ay * ay + az * az); ax /= al; ay /= al; az /= al;
+  for (const i of doorIds) { car.nodes[i].vel.x = ax * speed; car.nodes[i].vel.y = ay * speed; car.nodes[i].vel.z = az * speed; }
+  const aimed = doorIds.filter((_, k) => (Math.floor(k / 5) <= 1) && (k % 5) <= 3);
+  const steps = Math.round((0.55 / speed + 0.12) * 480);
+  const seen = new Set();
+  let throughAimed = 0;
+  for (let s = 0; s < steps; s++) {
+    car.step(1 / 480, NO_INPUT, world);
+    // cabin plane from three corner nodes, normal toward the door
+    const p0 = car.nodes[cabinIds[0]].pos, p1 = car.nodes[cabinIds[4]].pos, p2 = car.nodes[cabinIds[10]].pos;
+    let nx = (p1.y - p0.y) * (p2.z - p0.z) - (p1.z - p0.z) * (p2.y - p0.y),
+        ny = (p1.z - p0.z) * (p2.x - p0.x) - (p1.x - p0.x) * (p2.z - p0.z),
+        nz = (p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x);
+    const nl = Math.sqrt(nx * nx + ny * ny + nz * nz); nx /= nl; ny /= nl; nz /= nl;
+    const dcen = cen(doorIds);
+    if (nx * (dcen.x - p0.x) + ny * (dcen.y - p0.y) + nz * (dcen.z - p0.z) < 0) { nx = -nx; ny = -ny; nz = -nz; }
+    for (const i of aimed) {
+      const p = car.nodes[i].pos;
+      const d = nx * (p.x - p0.x) + ny * (p.y - p0.y) + nz * (p.z - p0.z);
+      if (d < -0.03 && !seen.has(i)) { seen.add(i); throughAimed++; }
+    }
+  }
+  return { throughAimed, aimedN: aimed.length, contacts: car.scContacts };
+}
+test('48 self-collision quad-centre hole: stretched panel stops centre-aimed nodes (v2.7.1)', () => {
+  const infos = [];
+  for (const speed of [5, 10]) {
+    const r = runSlam(speed, true);
+    assert(r.throughAimed <= 3, '@' + speed + ' m/s: ' + r.throughAimed + '/' + r.aimedN + ' centre-aimed nodes passed through the stretched panel (v2.7 core: 7/8)');
+    infos.push('@' + speed + ' m/s aimed through ' + r.throughAimed + '/' + r.aimedN + ', contacts ' + r.contacts);
+  }
+  const ctrl = runSlam(10, false);
+  assert(ctrl.throughAimed >= 6, 'control (pass disabled) should show the hole: only ' + ctrl.throughAimed + '/' + ctrl.aimedN + ' through');
+  infos.push('control (pass off) @10 m/s: ' + ctrl.throughAimed + '/' + ctrl.aimedN + ' through');
+  return infos.join('; ');
+});
+
+/* 51 — the UNSTRETCHED quad-centre hole (round 2): a coarse panel
+   (0.30 m spacing, 0.075 m radii — the @150-style lattice) whose
+   quad centres sit 0.21 m from every corner, outside the 0.15 m
+   radii sum, with NO stretch anywhere. Round 1's pseudo build
+   never engaged here: nothing is stretched, and a centre-aimed
+   node makes no node-node contact on its way in, so the pass
+   stayed cold while the sheet threaded. Round 2 engages two ways:
+   midpoint pseudos are built for every beam once the pass is hot
+   or fast, and the PROXIMITY latch (an unmasked node pair inside
+   1.5x its radii sum) turns the pass hot ~0.07-0.14 m before the
+   sheets meet. This is the verifier's sideSlam condition (a
+   coherent sheet crossing an unstretched sheet) in miniature. */
+function slamRigCageCoarse() {
+  const nodes = [], beams = [];
+  const add = (x, y, z, g, r) => { nodes.push({ x, y, z, mass: 25, group: g, kind: 'chassis', radius: r, frictionCoef: 0.8 }); return nodes.length - 1; };
+  const ys = [], zs = [];
+  for (let i = 0; i < 3; i++) ys.push(0.45 + i * 0.30);
+  for (let i = 0; i < 5; i++) zs.push(-2 * 0.30 + i * 0.30);
+  const cabin = {}, door = {};
+  for (const y of ys) for (const z of zs) cabin[y + ',' + z] = add(0, y, z, 'cabin', 0.075);
+  for (const y of ys) for (const z of zs) door[y + ',' + z] = add(0.55, y + 0.15, z + 0.15, 'left', 0.075);
+  const grid = (map) => {
+    for (let iy = 0; iy < 3; iy++) for (let iz = 0; iz < 5; iz++) {
+      const id = map[ys[iy] + ',' + zs[iz]];
+      if (iz < 4) beams.push(cageBeam(id, map[ys[iy] + ',' + zs[iz + 1]], 250000, 2200));
+      if (iy < 2) beams.push(cageBeam(id, map[ys[iy + 1] + ',' + zs[iz]], 250000, 2200));
+      if (iz < 4 && iy < 2) {
+        beams.push(cageBeam(id, map[ys[iy + 1] + ',' + zs[iz + 1]], 250000, 2200));
+        beams.push(cageBeam(map[ys[iy + 1] + ',' + zs[iz]], map[ys[iy] + ',' + zs[iz + 1]], 250000, 2200));
+      }
+    }
+  };
+  grid(cabin); grid(door);
+  const wheels = [];
+  for (const [wx, wz] of [[-0.8, 1.05], [0.8, 1.05], [-0.8, -1.05], [0.8, -1.05]]) {
+    nodes.push({ x: wx, y: 0.33, z: wz, mass: 13, group: 'wheel', kind: 'wheel', radius: 0.33, frictionCoef: 1.0 });
+    wheels.push({ node: nodes.length - 1, radius: 0.33 });
+  }
+  for (const w of wheels) {
+    const wn = nodes[w.node];
+    const scored = [];
+    for (const k in cabin) { const cn = nodes[cabin[k]]; scored.push([(cn.x - wn.x) ** 2 + (cn.z - wn.z) ** 2, cabin[k]]); }
+    scored.sort((a, b) => a[0] - b[0]);
+    for (let q = 0; q < 3; q++) beams.push(cageBeam(w.node, scored[q][1], 60000, 1500, 0.3, 0.75));
+  }
+  const doorIds = Object.values(door), cabinIds = Object.values(cabin);
+  const cAt = (iy, iz) => cabin[ys[iy] + ',' + zs[iz]];
+  return { cage: { name: 'slamrig-coarse', nodes, beams, triangles: [{ a: cabinIds[0], b: cabinIds[1], c: cabinIds[2], collidable: true }],
+                   wheels, refNodes: { front: cAt(1, 4), rear: cAt(1, 0), top: cAt(2, 2), floor: wheels[0].node },
+                   totalMass: nodes.reduce((s, n) => s + n.mass, 0) },
+           doorIds, cabinIds };
+}
+test('51 self-collision quad-centre hole, unstretched coarse panel (v2.7.1 round 2)', () => {
+  const infos = [];
+  for (const speed of [5, 10]) {
+    const r = runSlam(speed, true, slamRigCageCoarse, 1);
+    assert(r.throughAimed <= 3, '@' + speed + ' m/s: ' + r.throughAimed + '/' + r.aimedN + ' centre-aimed nodes passed through the UNSTRETCHED coarse panel');
+    infos.push('@' + speed + ' m/s aimed through ' + r.throughAimed + '/' + r.aimedN + ', contacts ' + r.contacts);
+  }
+  const ctrl = runSlam(10, false, slamRigCageCoarse, 1);
+  assert(ctrl.throughAimed >= 6, 'control (pass disabled) should show the hole: only ' + ctrl.throughAimed + '/' + ctrl.aimedN + ' through');
+  infos.push('control (pass off) @10 m/s: ' + ctrl.throughAimed + '/' + ctrl.aimedN + ' through');
+  return infos.join('; ');
+});
+
+/* 49 — the cadence gate: parked/slow internal motion must report
+   no fast relative movement (the pass may idle at 240 Hz); one
+   node moving at crash speed inside the set must trip it (the
+   pass then runs every substep during the approach, before any
+   contact registers). */
+test('49 self-collision cadence gate: _scFastRelative trips on internal crash speeds (v2.7.1)', () => {
+  const world = new TrackWorld(1337);
+  const car = spawnAt('sedan', world, 100, 150);
+  stepFor(car, world, 1.5, NO_INPUT);
+  assert(car._scFastRelative() === false, 'parked car reported fast internal motion');
+  const nd = car.nodes[10];
+  const vx = nd.vel.x, vy = nd.vel.y, vz = nd.vel.z;
+  nd.vel.x += 30;
+  assert(car._scFastRelative() === true, 'a node at +30 m/s inside the set did not trip the gate');
+  nd.vel.x = vx; nd.vel.y = vy; nd.vel.z = vz;
+  assert(car._scFastRelative() === false, 'gate stayed tripped after the velocity was restored');
+  return 'parked false, +30 m/s node true, restored false';
+});
+
+/* 50 — the clamp cap itself: a support beam (breakStrain 50 — in
+   v2.7 its positional clamp bound was 50x rest, i.e. none) pulled
+   to 3x rest must be projected back to the capped bound, and a
+   frame beam crushed to 0.1x rest must be projected back up. */
+test('50 beam clamp cap: support beam at 3x rest projects to <=1.6x, crushed beam recovers (v2.7.1)', () => {
+  const world = new TrackWorld(1337);
+  const car = spawnAt('sedan', world, 100, 150);
+  stepFor(car, world, 1.5, NO_INPUT);
+  const sup = car.beams.find(b => b.kind === 'support' && !b.broken);
+  assert(sup, 'no support beam found');
+  const A = car.nodes[sup.a], B = car.nodes[sup.b];
+  const stretchTo = (node, other, ratio) => {
+    const dx = node.pos.x - other.pos.x, dy = node.pos.y - other.pos.y, dz = node.pos.z - other.pos.z;
+    const L = Math.sqrt(dx * dx + dy * dy + dz * dz), want = sup.rest * ratio;
+    node.pos.x = other.pos.x + dx / L * want; node.pos.y = other.pos.y + dy / L * want; node.pos.z = other.pos.z + dz / L * want;
+    node.vel.x = 0; node.vel.y = 0; node.vel.z = 0;
+  };
+  stretchTo(B, A, 3);
+  car.enforceBeamLimits();
+  const dT = distNodes(car, sup.a, sup.b) / sup.rest;
+  assert(dT <= 1.6, 'support beam at 3x rest only clamped to ' + dT.toFixed(3) + 'x (cap is 1.55x + sweep residue)');
+  stretchTo(B, A, 0.1);
+  car.enforceBeamLimits();
+  const dC = distNodes(car, sup.a, sup.b) / sup.rest;
+  assert(dC >= 0.4, 'support beam crushed to 0.1x rest only recovered to ' + dC.toFixed(3) + 'x (floor is 0.45x)');
+  return 'support 3x -> ' + dT.toFixed(3) + 'x, 0.1x -> ' + dC.toFixed(3) + 'x';
+});
+
+/* 52 — the proximity latch must stay silent in clean driving
+   (round 2 regression guard): the latch exists to pre-engage the
+   beam-midpoint pseudo build when two sheets are ABOUT to meet.
+   Its first form was distance-only (an unmasked node pair inside
+   1.5x its radii sum), and at 1000 nodes the radii shrink faster
+   than the node spacings, so neighbourhoods of the intact cage
+   rest permanently inside 1.5x of an unmasked pair — measured:
+   the latch held the pass hot on 4800 of 4800 calls of a clean
+   10 s drive at 1000 nodes, the pseudo build ran on every call,
+   and the drive took ~40 s instead of ~6 s (test 31 caught it as
+   a 44,328 ms failure). The latch now also requires the pair to
+   be closing at 0.75 m/s or faster: a resting structural pair
+   has no closing speed, an impending meeting does. This test
+   drives the test-31 scenario at 1000 nodes and asserts the hot
+   latch never engages and no self-contact registers — clean
+   driving must cost what it cost before the latch existed. */
+test('52 self-collision proximity latch: silent in clean driving @1000 (v2.7.1 round 2)', () => {
+  const world = new TrackWorld(1337);
+  const car = spawnAt('sedan', world, 100, 1000);
+  stepFor(car, world, 2, NO_INPUT);
+  let hotSamples = 0;
+  for (let i = 0; i < 600; i++) {
+    car.step(1 / 60, laneInput(world, car, 1, 0), world);
+    if (car._scHotT > 0) hotSamples++;
+  }
+  assert(!car.hasNaN(), 'NaN during the latch-guard drive');
+  assert(car.scContacts === 0, 'clean driving registered ' + car.scContacts + ' self-contacts');
+  assert(hotSamples === 0, 'self-collision hot latch engaged on ' + hotSamples + '/600 clean-driving steps (distance-only latch regression)');
+  return 'hot latch engaged on 0/600 steps, 0 self-contacts over the 10 s drive @1000';
+});
+
 console.log(failures === 0 ? '\nALL TESTS PASS' : '\n' + failures + ' TEST(S) FAILED');
 process.exit(failures === 0 ? 0 : 1);
