@@ -30,6 +30,44 @@ let importedMap = null;                 // {converted, hash, name}
 const importedCars = [];                // {cage, hash}
 let parts = null;                       // PartsSystem for the current car
 
+/* ---- v2.7.2 layered errors (js/ui/errors.js) ----
+   edLastOp names the last significant thing the player did, so the
+   fatal box can say what was happening when an error hit. edFail is
+   the one funnel for loading-panel failures: headline + where +
+   why + hint, logged and left on screen (never auto-dismissed). */
+let edLastOp = 'browsing the menu';
+function edContext(){
+  return {
+    view: (window.LoadingScreen && LoadingScreen.isOpen()) ? 'loading screen'
+        : started ? (paused ? 'paused' : 'driving') : 'menu',
+    car: (typeof carDef !== 'undefined' && carDef)
+        ? carDef.name + (selCar.kind === 'imported' ? ' (imported cage)' : ' (' + carDef.id + ')')
+        : (pendingDef ? pendingDef.name : null),
+    map: selMap.kind === 'imported' && importedMap ? importedMap.name : 'Endless (procedural)',
+    lastOp: edLastOp
+  };
+}
+if (window.__EDERR && typeof __EDERR.setContextProvider === 'function')
+  __EDERR.setContextProvider(edContext);
+function edTag(err, stage, file){
+  if (window.__EDERR && typeof __EDERR.tagError === 'function') return __EDERR.tagError(err, stage, file);
+  if (err && typeof err === 'object'){ if (!err.edStage) err.edStage = stage; if (!err.edFile && file) err.edFile = file; }
+  return err;
+}
+function edFail(err, ctx){
+  if (window.__EDERR && typeof __EDERR.presentInLoading === 'function' && __EDERR.presentInLoading(err, ctx || {})) return;
+  if (window.LoadingScreen) LoadingScreen.fail(String((err && err.message) || err));
+}
+/* Same funnel for failures that are not Errors (the multiplayer
+   content check): d is a formatError-shaped {headline, where, why,
+   hint} object, logged line by line and left on screen. */
+function edFailDetail(d){
+  if (!window.LoadingScreen) return;
+  // failDetail renders the layers AND writes them to the log.
+  if (typeof LoadingScreen.failDetail === 'function') LoadingScreen.failDetail(d);
+  else LoadingScreen.fail([d.headline, d.why, d.hint].filter(Boolean).join(' — '));
+}
+
 /* ---- per-car beam resolution: persisted node targets + panel ---- */
 let resPanelOn = true;
 const cardResEls = [];
@@ -123,6 +161,7 @@ function attachParts(){
   parts = (typeof window.PartsSystem === 'function') ? new window.PartsSystem(car) : null;
 }
 function setCar(defId, sPos){
+  edLastOp = 'switching car';
   carDef = S.CAR_DEFS.find(d=>d.id===defId) || S.CAR_DEFS[0];
   selCar = { kind:'builtin', def:carDef };
   car = S.spawnCar(carDef.id, driveWorld, (sPos===undefined ? 100 : sPos));
@@ -329,20 +368,27 @@ function importModulesReady(kind){
 }
 async function importCarZip(file){
   LoadingScreen.onBack = null; // an import's Back must never run an MP cancel hook
+  edLastOp = 'importing car ' + file.name;
   LoadingScreen.show('Importing car — ' + file.name);
   if (!importModulesReady('car')){
     LoadingScreen.fail('The BeamNG import modules are not loaded in this build, so cars cannot be imported yet.');
     return;
   }
   try {
-    const buf = await readFileBytes(file, 0.08);
-    LoadingScreen.stage(0.1, 'Reading zip…');
-    const zipMap = await window.__ZIP.readZip(buf);
-    const hash = await window.__ZIP.sha256Hex(new Uint8Array(buf));
+    let buf, zipMap, hash;
+    try {
+      buf = await readFileBytes(file, 0.08);
+      LoadingScreen.stage(0.1, 'Reading zip…');
+      zipMap = await window.__ZIP.readZip(buf);
+      hash = await window.__ZIP.sha256Hex(new Uint8Array(buf));
+    } catch (e) { throw edTag(e, 'unzip', file.name); }
     LoadingScreen.log('zip sha256: ' + String(hash).slice(0, 16) + '…');
-    const cage = await window.__JBEAM.assembleVehicle(zipMap, { onProgress: p=>{
-      LoadingScreen.stage(0.1 + 0.9 * (p.frac || 0), p.msg);
-    }});
+    let cage;
+    try {
+      cage = await window.__JBEAM.assembleVehicle(zipMap, { onProgress: p=>{
+        LoadingScreen.stage(0.1 + 0.9 * (p.frac || 0), p.msg);
+      }});
+    } catch (e) { throw edTag(e, 'vehicle', file.name); }
     const entry = { cage:cage, hash:hash };
     importedCars.push(entry);
     LoadingScreen.log('cage ready: ' + (cage.nodes ? cage.nodes.length : '?') + ' nodes, ' +
@@ -352,7 +398,7 @@ async function importCarZip(file){
     LoadingScreen.done();
     toast('Imported ' + (cage.name || file.name), 2000);
   } catch (err) {
-    LoadingScreen.fail('Car import failed: ' + ((err && err.message) || err));
+    edFail(err, { op: 'Importing car — ' + file.name });
   }
 }
 function addImportedCarCard(entry){
@@ -382,30 +428,44 @@ function selectImportedCar(entry, el){
 }
 async function importMapZip(file){
   LoadingScreen.onBack = null; // an import's Back must never run an MP cancel hook
+  edLastOp = 'importing map ' + file.name;
   LoadingScreen.show('Importing map — ' + file.name);
   if (!importModulesReady('map')){
     LoadingScreen.fail('The BeamNG import modules are not loaded in this build, so maps cannot be imported yet.');
     return;
   }
   try {
-    const buf = await readFileBytes(file, 0.08);
-    LoadingScreen.stage(0.1, 'Reading zip…');
-    const zipMap = await window.__ZIP.readZip(buf);
-    const hash = await window.__ZIP.sha256Hex(new Uint8Array(buf));
+    let buf, zipMap, hash;
+    try {
+      buf = await readFileBytes(file, 0.08);
+      LoadingScreen.stage(0.1, 'Reading zip…');
+      zipMap = await window.__ZIP.readZip(buf);
+      hash = await window.__ZIP.sha256Hex(new Uint8Array(buf));
+    } catch (e) { throw edTag(e, 'unzip', file.name); }
     LoadingScreen.log('zip sha256: ' + String(hash).slice(0, 16) + '…');
-    const converted = await window.__BMAP.importMap(zipMap, { onProgress: p=>{
-      LoadingScreen.stage(0.1 + 0.9 * (p.frac || 0), p.msg);
-    }});
+    // The converter narrates its stage as it goes; remember the last
+    // one so a failure that carries no context of its own still names
+    // the stage it died in. (The converter tags its own errors with
+    // the exact file inside the zip where it can — those win.)
+    let curStage = 'terrain';
+    let converted;
+    try {
+      converted = await window.__BMAP.importMap(zipMap, { onProgress: p=>{
+        if (p && p.stage) curStage = p.stage;
+        LoadingScreen.stage(0.1 + 0.9 * (p.frac || 0), p.msg);
+      }});
+    } catch (e) { throw edTag(e, curStage, file.name); }
     importedMap = { converted:converted, hash:hash, name:file.name };
     const rep = converted.report || {};
     (rep.missing || []).forEach(m=>LoadingScreen.log('missing: ' + String((m && m.name) || m)));
     (rep.substitutions || []).forEach(s=>LoadingScreen.log('substituted: ' + String((s && s.name) || s)));
+    (rep.warnings || []).forEach(w=>LoadingScreen.log('warning: ' + String(w)));
     selectMap('imported');
     renderMapReport(rep, file.name);
     LoadingScreen.done();
     toast('Map imported: ' + file.name, 2000);
   } catch (err) {
-    LoadingScreen.fail('Map import failed: ' + ((err && err.message) || err));
+    edFail(err, { op: 'Importing map — ' + file.name });
   }
 }
 function selectMap(kind){
@@ -419,12 +479,36 @@ function renderMapReport(rep, fileName){
   const box = $('mapReport');
   const counts = rep.counts || {};
   const countLines = Object.keys(counts).map(k=>k + ': ' + counts[k]).join(' · ');
+  const esc = s => String(s).replace(/</g, '&lt;');
   const list = arr => '<ul class="mrList">' + (arr || []).map(m=>
-    '<li>' + String((m && (m.name || m.asset)) || m).replace(/</g, '&lt;') + '</li>').join('') + '</ul>';
+    '<li>' + esc((m && (m.name || m.asset)) || m) + '</li>').join('') + '</ul>';
+  // Terrain line (v2.7.2): the converter's terrain choice was computed
+  // on every import but shown nowhere — scale AND its source (read
+  // from the level's TerrainBlock vs chosen by the scored search) are
+  // the first thing to question when a map looks wrong, so they are
+  // printed here, next to the counts.
+  let terrainLine = '';
+  const tc = rep.terrainChoice;
+  if (tc){
+    const orient = [];
+    if (tc.flipNS) orient.push('flipped N–S');
+    if (tc.transpose) orient.push('transposed');
+    terrainLine = '<div>Terrain: ' + tc.size + '×' + tc.size + ' grid · ' +
+      Math.round(rep.worldSize || 0) + ' m across · maxHeight ' + tc.maxHeight +
+      ' m (' + esc(tc.maxHeightSource || '?') + ') · squareSize ' + tc.squareSize +
+      ' m (' + esc(tc.squareSizeSource || '?') + ')' +
+      (orient.length ? ' · orientation: ' + orient.join(' + ') : '') +
+      ' · ' + (tc.holeCount || 0) + ' holes' +
+      (typeof tc.spawnGroundErrorMeters === 'number'
+        ? ' · spawn ground error ' + tc.spawnGroundErrorMeters.toFixed(2) + ' m' : '') +
+      '</div>';
+  }
   box.innerHTML = '<div class="mrTitle">Map load report — ' + fileName.replace(/</g, '&lt;') + '</div>' +
     (countLines ? '<div>' + countLines + '</div>' : '<div>No counts reported.</div>') +
+    terrainLine +
     ((rep.missing && rep.missing.length) ? '<div>Missing (not in the zip — cannot be rendered):</div>' + list(rep.missing) : '<div>Nothing missing.</div>') +
-    ((rep.substitutions && rep.substitutions.length) ? '<div>Substituted textures:</div>' + list(rep.substitutions) : '');
+    ((rep.substitutions && rep.substitutions.length) ? '<div>Substituted textures:</div>' + list(rep.substitutions) : '') +
+    ((rep.warnings && rep.warnings.length) ? '<div>Warnings:</div>' + list(rep.warnings) : '');
   box.classList.remove('hidden');
 }
 /* drag-drop onto the menu: a zip with .jbeam inside is a car; a zip
@@ -447,7 +531,9 @@ async function handleDroppedZip(file){
     else if (isMap) importMapZip(file);
     else toast('That zip has no .jbeam car or level data I recognise', 2400);
   } catch (err) {
-    toast('Could not read that zip: ' + ((err && err.message) || err), 2400);
+    edTag(err, 'unzip', file.name);
+    const head = (window.__EDERR && __EDERR.formatError) ? __EDERR.formatError(err, {}).headline : 'Could not read that zip';
+    toast(head + ' — see the import panel for details', 2400);
   }
 }
 
@@ -470,7 +556,13 @@ function updateMpLocalContent(){
 function wireMultiplayer(){
   if (!window.Multiplayer) return;
   const M = Multiplayer;
-  M.onLog = line=>{ const s = $('mpStatus'); if (s && M.state.status !== 'connected') s.textContent = 'Multiplayer: ' + line; };
+  M.onLog = line=>{
+    const s = $('mpStatus'); if (s && M.state.status !== 'connected') s.textContent = 'Multiplayer: ' + line;
+    // While a host/join panel is open, the narration belongs in its
+    // log too — that is where the player is looking (and where a
+    // 'peer content mismatch' line must not scroll past unseen).
+    if (window.LoadingScreen && LoadingScreen.isOpen()) LoadingScreen.log(line);
+  };
   M.onStatus = st=>{
     const s = $('mpStatus');
     if (s) s.textContent = 'Multiplayer: ' + st.status +
@@ -499,16 +591,44 @@ function wireMultiplayer(){
     updateMpLocalContent();
   };
   M.onContentMismatch = desc=>{
+    // Layered (v2.7.2): what differs, whose is whose, and — when the
+    // two sides imported zips — BOTH file hashes in short form, so
+    // "same map name, different zip" is visible instead of mysterious.
+    const host = desc || {};
+    const mine = mpLocalDesc();
+    const sh = h => (window.__EDERR && __EDERR.shortHash) ? __EDERR.shortHash(h) : (h ? String(h).slice(0, 10) + '…' : '—');
+    const side = (label, name, hash) => label + ': ' + (name || '?') + (hash ? ' (zip ' + sh(hash) + ')' : '');
+    const why = [];
+    if (host.mapName !== mine.mapName || host.mapHash !== mine.mapHash){
+      why.push(side('Host map', host.mapName, host.mapHash));
+      why.push(side('Your map', mine.mapName, mine.mapHash));
+      if (host.mapHash && mine.mapHash && host.mapHash !== mine.mapHash)
+        why.push('The map names can match while the zip files differ — the hashes prove these are different files.');
+      if (!mine.mapHash && host.mapHash)
+        why.push('You are on the built-in procedural map; the host is using an imported map zip.');
+    }
+    if (host.carName !== mine.carName || host.carHash !== mine.carHash){
+      why.push(side('Host car', host.carName, host.carHash));
+      why.push(side('Your car', mine.carName, mine.carHash));
+      if (host.carHash && mine.carHash && host.carHash !== mine.carHash)
+        why.push('The car hashes differ — different car zips, even if the name matches.');
+    }
+    if (!why.length) why.push('The host\'s content description did not match yours (names or hashes differ).');
     LoadingScreen.show('Multiplayer — content needed');
-    LoadingScreen.fail('You need the host\'s map/car — import the same zip. Host map: ' +
-      (desc && desc.mapName || '?') + ' · host car: ' + (desc && desc.carName || '?') +
-      '. Import it from the menu\'s CAR / MAP sections, then press "Re-check content".');
+    edFailDetail({
+      headline: 'Your map or car doesn\'t match the host\'s',
+      where: 'Stage: Multiplayer — content check with the host',
+      why: why.join('\n'),
+      hint: 'Import the exact zip file the host used (the same download — not just a map/car with the same name) ' +
+            'from the menu\'s CAR / MAP sections, then press "Re-check content".'
+    });
     $('mpRecheckBtn').disabled = false;
   };
   M.onPeerGone = ()=>{ despawnRemote(); toast('Peer disconnected', 1800); };
 
   $('mpHostBtn').onclick = ()=>{
     updateMpLocalContent();
+    edLastOp = 'hosting a multiplayer room';
     LoadingScreen.show('Multiplayer — hosting');
     // Back just returns to the menu; hosting continues in the
     // background (the room code / offer stays valid).
@@ -524,7 +644,7 @@ function wireMultiplayer(){
         LoadingScreen.stage(0.4, 'Long join code ready — share it, then paste the reply code in the menu and press Apply');
         LoadingScreen.log('waiting for a reply code…');
       }
-    }).catch(err=>LoadingScreen.fail('Hosting failed: ' + ((err && err.message) || err)));
+    }).catch(err=>edFail(err, { stage:'multiplayer', headline:'Hosting failed', op:'Hosting a room' }));
   };
   /* Room-code join: the code entry lives in the menu (#mpRoomIn) and
      is never cleared by the flow, so cancelling the loading panel
@@ -532,6 +652,7 @@ function wireMultiplayer(){
      room being joined in its room slot for the whole attempt. */
   function startRoomJoin(code){
     updateMpLocalContent();
+    edLastOp = 'joining room ' + code;
     LoadingScreen.show('Multiplayer — joining');
     LoadingScreen.setRoomCode(code, 'JOINING ROOM');
     LoadingScreen.onBack = ()=>{ M.disconnect(); toast('Join cancelled', 1400); };
@@ -540,8 +661,13 @@ function wireMultiplayer(){
       // 'connected' is handled by onConnected
     }).catch(err=>{
       LoadingScreen.onBack = null;
-      LoadingScreen.fail('Join failed: ' + ((err && err.message) || err) +
-        ' — check the code, or ask the host for a long code and paste it under "Long codes" in the menu.');
+      if (err && typeof err === 'object'){
+        if (M.state.attempt) err.edDetail = 'Attempts used: ' + M.state.attempt + ' of 4.';
+        if (/connection failed|peer-unavailable|ICE failed/.test(err.message || ''))
+          err.edHint = 'Check the code is exactly right and the host is still hosting — ' +
+            'or ask the host for a long code and paste it under "Long codes" in the menu.';
+      }
+      edFail(err, { stage:'multiplayer', headline:'Couldn\'t join room ' + code, op:'Joining room ' + code });
     });
   }
   $('mpRoomIn').addEventListener('input', ()=>{
@@ -568,12 +694,14 @@ function wireMultiplayer(){
     const room = M.normalizeRoomCode(code);
     if (M.state.mode !== 'host' && room){ startRoomJoin(room); return; }
     if (M.state.mode === 'host'){
+      edLastOp = 'accepting a joiner\'s reply code';
       LoadingScreen.show('Multiplayer — connecting');
       LoadingScreen.onBack = null;
       LoadingScreen.showBack('Menu');
-      M.acceptReply(code).catch(err=>LoadingScreen.fail('Connect failed: ' + ((err && err.message) || err)));
+      M.acceptReply(code).catch(err=>edFail(err, { stage:'multiplayer', headline:'Connect failed', op:'Accepting the reply code' }));
     } else {
       updateMpLocalContent();
+      edLastOp = 'joining with a long code';
       LoadingScreen.show('Multiplayer — joining');
       LoadingScreen.onBack = null;
       LoadingScreen.showBack('Menu');
@@ -584,7 +712,7 @@ function wireMultiplayer(){
         LoadingScreen.log('waiting for the host to connect…');
       }).catch(err=>{
         if (!LoadingScreen.isOpen()) LoadingScreen.show('Multiplayer — joining');
-        LoadingScreen.fail('Join failed: ' + ((err && err.message) || err));
+        edFail(err, { stage:'multiplayer', headline:'Couldn\'t join with that long code', op:'Joining with a long code' });
       });
     }
   };
@@ -715,10 +843,12 @@ function startGame(){
     try { const sp = driveWorld.spawnPoint(); if (sp && typeof sp.s === 'number') sPos = sp.s; } catch (e) { /* default stands */ }
   }
   let ok = false;
+  edLastOp = 'starting the game';
   try { ok = spawnSelected(sPos); } catch (err) {
     if (window.LoadingScreen){
       LoadingScreen.show('Starting game');
-      LoadingScreen.fail('The selected car/map could not be spawned: ' + ((err && err.message) || err));
+      edTag(err, 'spawn', null);
+      edFail(err, { op: 'Starting the game with ' + (carDef ? carDef.name : 'the selected car') });
     }
     driveWorld = world;
     return;
