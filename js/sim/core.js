@@ -370,11 +370,28 @@ class Beam {
     //  - maxPlastic caps how far the yielded rest length may ever travel:
     //    a crushed zone stops folding once it has given up 70% of the
     //    displacement that would break it, and from there it only springs.
-    //  - maxDisp is the hard displacement limit: an unbroken beam is never
-    //    allowed to sit further than this from its rest length (enforced
-    //    positionally by SoftBodyCar.enforceBeamLimits).
+    //  - maxDisp is the break-referenced displacement bound
+    //    (breakStrain x rest). The POSITIONAL clamp in
+    //    SoftBodyCar.enforceBeamLimits uses the capped clampDisp
+    //    below, not this — see there.
     this.maxPlastic = 0.7 * this.breakStrain * rest * (opts.plasticScale===undefined ? 1 : opts.plasticScale);
     this.maxDisp = this.breakStrain * rest;
+    // v2.7.1 clamp cap: clampDisp = min(breakStrain, 0.55) x rest.
+    // breakStrain is floored at 0.09/rest so a short beam needs ~9 cm
+    // of displacement to BREAK — sound for breaking, but as the
+    // clamp bound it let a 10 cm beam sit at 1.9x rest and compress
+    // to 0.07x (measured, sedan @500 wall crash: peak tensile 1.73x,
+    // peak compressive 0.093x on rest ~0.097 m crumple beams whose
+    // floored breakStrain is ~0.92 against a 0.32 material value),
+    // and it left support beams (breakStrain 50, deliberately
+    // unbreakable, tension-silent) with NO displacement limit at
+    // all — measured settled at 1.91x rest in the same wreck,
+    // tethering torn structure on invisible unbreakable lines. The
+    // cap bounds every unbroken beam positionally to [0.45, 1.55]x
+    // rest; beams whose material break strain is below the cap
+    // (bumper 0.16, crumple 0.32, panel 0.45, and every long beam
+    // whose floor never engages) keep exactly their old bound.
+    this.clampDisp = Math.min(this.breakStrain, 0.55) * rest;
     this.suspension = !!opts.suspension;
     this.broken = false; this.deformed = false; this.maxStrain = 0;
     // zone material name (see MATERIALS) and the live stress readout:
@@ -403,8 +420,8 @@ class Beam {
     // cached derived limits (rest/deform/break never change after
     // construction): the hot loops read these instead of re-multiplying
     this.yieldDisp = this.deformStrain * rest;
-    this.hiDisp = rest + this.maxDisp;
-    this.loDisp = rest - this.maxDisp;
+    this.hiDisp = rest + this.clampDisp;
+    this.loDisp = rest - this.clampDisp;
     this.hi2 = this.hiDisp * this.hiDisp;
     this.lo2 = this.loDisp * this.loDisp;
   }
@@ -501,6 +518,18 @@ function beamAxialForce(b, L, rel, alpha, dampArr, idx){
   // progressive stiffening past yield (see the loop's old comment):
   // +1x rate on the excess, symmetric both ways
   if (adisp > b.yieldDisp) f += (disp < 0 ? -1 : 1) * b.k * (adisp - b.yieldDisp);
+  // v2.7.1 tension strain-stiffening, measured against the ORIGINAL
+  // rest length (the break/clamp convention): past 1.30x rest an
+  // extra +2x k on the excess, so a beam being torn toward its
+  // displacement clamp decelerates the separation progressively
+  // instead of riding the clamp at full stretch (measured v2.7
+  // transient peaks: 1.73x @500, 1.64x on muscle @820 — all on
+  // beams whose floored break strain let the clamp sit at 1.8-1.9x).
+  // Tension only: the compression law — including the pressured-
+  // strut numbers the unit tests pin at 0.8x/0.5x — is unchanged,
+  // and below 1.30x this term is identically zero.
+  const over = L - b.rest * 1.3;
+  if (over > 0) f += b.k * over * 2;
   // pressured term: progressive outward push while compressed.
   // Asymmetric by direction (the same compression/rebound split
   // BeamNG documents for its dampers): full force while the beam
@@ -804,6 +833,7 @@ class SoftBodyCar {
       const nb = this.beams.length;
       const bk = new Float64Array(nb), bc = new Float64Array(nb),
             byd = new Float64Array(nb), bpr = new Float64Array(nb),
+            bre = new Float64Array(nb),
             beL = new Float64Array(nb), be2 = new Float64Array(nb),
             bhi = new Float64Array(nb), blo = new Float64Array(nb),
             bsup = new Uint8Array(nb), bfil = new Uint8Array(nb),
@@ -813,6 +843,7 @@ class SoftBodyCar {
       for (let i=0;i<nb;i++){
         const b = this.beams[i];
         bk[i] = b.k; bc[i] = b.c; byd[i] = b.yieldDisp; bpr[i] = b.pressure;
+        bre[i] = b.rest;
         beL[i] = b.engageLen; be2[i] = b.engage2; bhi[i] = b.hi2; blo[i] = b.lo2;
         bsup[i] = b.kind === 'support' ? 1 : 0;
         // band-limit scoping (v2.6 optimisation): the damping filter
@@ -833,6 +864,7 @@ class SoftBodyCar {
         bpA[i] = b.nA.pos; bvA[i] = b.nA.vel; bpB[i] = b.nB.pos; bvB[i] = b.nB.vel;
       }
       this._bk = bk; this._bc = bc; this._byd = byd; this._bpr = bpr;
+      this._brest = bre;
       this._beL = beL; this._be2 = be2; this._bhi2 = bhi; this._blo2 = blo;
       this._bsup = bsup; this._bfil = bfil; this._bfa = bfa; this._bfb = bfb;
       this._bpA = bpA; this._bvA = bvA; this._bpB = bpB; this._bvB = bvB;
@@ -1885,17 +1917,65 @@ class SoftBodyCar {
     this._scMaskBits = maskBits; this._scMaskWords = MW;
     // broadphase buffers (see selfCollide): flat position/velocity
     // scratch, inverse masses, and the counting-sort grid arrays,
-    // all preallocated — the pass allocates nothing
-    this._scPos = new Float64Array(n*3);
-    this._scVel = new Float64Array(n*3);
+    // all preallocated — the pass allocates nothing. The particle
+    // space is [0, n) real nodes plus [n, n + beams.length) slots
+    // for the v2.7.1 stretched-beam midpoint pseudo-particles (see
+    // selfCollide): the scratch, grid order/cell arrays and the
+    // particle-space radius/inverse-mass arrays are sized for both.
+    this._scPos = new Float64Array((n + beams.length)*3);
+    this._scVel = new Float64Array((n + beams.length)*3);
     this._scInvM = new Float64Array(n);
     for (let i=0;i<n;i++) if (inSet[i]) this._scInvM[i] = 1/nodes[i].mass;
+    this._scRadP = new Float32Array(n + beams.length);
+    this._scInvMP = new Float64Array(n + beams.length);
+    this._scPBeam = new Int32Array(beams.length);
     this._scTick = 0; this._scHotT = 0;
     this._scCounts = new Int32Array(SC_GRID_MAX + 1);
     this._scCursor = new Int32Array(SC_GRID_MAX + 1);
     this._scOcc = new Int32Array(SC_GRID_MAX);
-    this._scOrder = new Int32Array(n);
-    this._scCellOf = new Int32Array(n);
+    this._scOrder = new Int32Array(n + beams.length);
+    this._scCellOf = new Int32Array(n + beams.length);
+  }
+  // v2.7.1: is anything in the collision set moving fast relative
+  // to the set's own mean velocity? The 240 Hz cold cadence was
+  // justified by panel-relative speeds of a few m/s, but in a crash
+  // the rear of the car closes on the stopped front at 20+ m/s: at
+  // 240 Hz that is 8+ cm between checks, comparable to the whole
+  // interaction shell of a fine-grid panel (radii sums ~0.15 m), so
+  // a fast node can cross a panel plane between checks and be
+  // ejected on the far side (measured: panel-slam rig, 1 of 15
+  // nodes through at 30 m/s on an unstretched @500-style panel).
+  // While any set member moves faster than ~10 m/s relative to the
+  // set mean, selfCollide runs every substep. In ordinary driving
+  // the set's relative speeds stay in the low single digits
+  // (cornering is near-rigid rotation, ~1 m/s at the corners;
+  // suspension flex is a few m/s; the wheels — the fastest movers
+  // over bumps — are not in the set), so the gate costs one
+  // velocity scan per would-be-skipped substep and nothing more.
+  _scFastRelative(){
+    const nodes = this.nodes, inSet = this._scInSet, n = nodes.length;
+    let mx = 0, my = 0, mz = 0, cnt = 0;
+    for (let i=0;i<n;i++){
+      if (!inSet[i]) continue;
+      const v = nodes[i].vel; mx += v.x; my += v.y; mz += v.z; cnt++;
+    }
+    if (!cnt) return false;
+    mx /= cnt; my /= cnt; mz /= cnt;
+    for (let i=0;i<n;i++){
+      if (!inSet[i]) continue;
+      const v = nodes[i].vel;
+      const dx = v.x-mx, dy = v.y-my, dz = v.z-mz;
+      // (5 m/s)^2 relative to the set mean. The mean includes the
+      // approaching panel itself, which halves the signal: two
+      // panels closing at 10 m/s pairwise show up here as ~5 m/s
+      // each against the mean. The first cut used (10 m/s)^2 and
+      // the gate stayed shut through exactly the 20 m/s panel-slam
+      // it was built for (measured: pseudo resolves per run fell
+      // from 111 at 5 m/s to 62 at 20 m/s and 12 of 15 gap-aimed
+      // nodes passed through the stretched panel)
+      if (dx*dx + dy*dy + dz*dz > 25) return true;
+    }
+    return false;
   }
   _scMasked(i, j){
     const off = this._scMaskOff, ids = this._scMaskIds;
@@ -1963,20 +2043,40 @@ class SoftBodyCar {
     this.setPoseFrame(c.x, c.y, c.z, f.right, f.up, f.fwd, v.x, v.y, v.z);
   }
   // hard maximum beam displacement: an unbroken beam may never sit more
-  // than maxDisp (= breakStrain x rest, measured against the ORIGINAL rest
-  // length — the same convention as checkDeform's thresholds) away from
-  // its rest length. Forces alone cannot guarantee that in a crash: one
+  // than clampDisp (= min(breakStrain, 0.55) x rest, measured against
+  // the ORIGINAL rest length — the same convention as checkDeform's
+  // thresholds; see the Beam constructor for why the clamp strain is
+  // capped below the floored break strain) away from its rest length.
+  // Forces alone cannot guarantee that in a crash: one
   // 480 Hz step at 30 m/s moves a node 6 cm, straight past the limit. So
   // after each integration pass, any beam found past the limit is
   // projected back to exactly the limit (correction split by inverse
   // mass, like a contact) and the relative velocity still carrying it
   // further out is removed. Broken beams are exempt — a detached part
   // stays detached. Within the limit this is a strict no-op.
-  enforceBeamLimits(){
+  enforceBeamLimits(sweeps){
     const beamsL = this.beams;
+    const nSweeps = sweeps || 1;
+    let total = 0;
+    for (let sw=0; sw<nSweeps; sw++){
+      const p = this._enforceSweep(beamsL);
+      total += p;
+      if (p === 0) break;
+    }
+    return total;
+  }
+  // one Gauss-Seidel sweep of the displacement clamp; returns how
+  // many beams were projected (the end-of-substep call in substep
+  // asks for a second sweep, since projecting one beam can push a
+  // beam sharing its nodes back past the limit — the single-sweep
+  // residue measured 1.58x / 0.32x against the 1.55x / 0.45x bound
+  // in the @500 wall crash. The default single sweep is what the
+  // unit tests pin.)
+  _enforceSweep(beamsL){
+    let projected = 0;
     // flat caches (see the constructor): pos/vel object refs and the
     // squared limit bounds as array slots — the projection path below
-    // (rare) still reads the Beam object's own rest/maxDisp/masses,
+    // (rare) still reads the Beam object's own rest/clampDisp/masses,
     // so the arithmetic is unchanged
     const bpA = this._bpA, bpB = this._bpB, bvA = this._bvA, bvB = this._bvB,
           bhi2 = this._bhi2, blo2 = this._blo2;
@@ -1994,9 +2094,10 @@ class SoftBodyCar {
       const A = b.nA, B = b.nB;
       const L = Math.sqrt(d2); if (L < 1e-6) continue;
       const disp = L - b.rest, adisp = Math.abs(disp);
-      if (adisp <= b.maxDisp) continue;
+      if (adisp <= b.clampDisp) continue;
       const ux = dx/L, uy = dy/L, uz = dz/L, s = Math.sign(disp);
-      const corr = adisp - b.maxDisp;
+      const corr = adisp - b.clampDisp;
+      projected++;
       const imA = 1/A.mass, imB = 1/B.mass, imSum = imA + imB;
       const wA = imA/imSum, wB = imB/imSum;
       pA.x += ux*s*corr*wA; pA.y += uy*s*corr*wA; pA.z += uz*s*corr*wA;
@@ -2011,6 +2112,7 @@ class SoftBodyCar {
         vB.x -= ux*rel*wB; vB.y -= uy*rel*wB; vB.z -= uz*rel*wB;
       }
     }
+    return projected;
   }
   /* ---------------- self-collision pass (v2.7) ----------------
      Runs ONCE per 480 Hz substep (not per beam subcycle), after
@@ -2031,7 +2133,9 @@ class SoftBodyCar {
      so a node moved by one contact is seen moved by the next);
      nothing in the pass allocates. Narrowphase: pairs inside
      their radii sum and outside the 2-hop mask resolve as a soft
-     contact — 55% of the overlap projected out per substep,
+     contact — 55% of the overlap projected out per substep
+     (v2.7.1: the fraction rises toward 95% as the overlap
+     deepens toward the full radii sum),
      split by inverse mass (at 480 Hz the rest closes within a
      few substeps, and the soft factor keeps a panel resting on
      another panel from jittering), plus damping of the approach
@@ -2045,20 +2149,45 @@ class SoftBodyCar {
   selfCollide(){
     if (!this.scEnabled) return;
     // cadence (perf): the full pass runs every 2nd substep (240 Hz)
-    // while the car is contact-free — two panels of the same car
-    // approach at panel-relative speeds (a few m/s, not road speed),
-    // so in 1/240 s a pair closes at most a few centimetres, far
-    // inside the smallest radii sum, and nothing can tunnel between
-    // checks. The moment a pass resolves a contact the pass goes
-    // HOT — every substep — for 0.25 s, so a crash fold in progress
-    // is resolved at the full 480 Hz rate. Measured: the pass is
+    // while the car is contact-free and slow inside itself — two
+    // panels of the same car approach at panel-relative speeds (a
+    // few m/s, not road speed), so in 1/240 s a pair closes at most
+    // a few centimetres, far inside the smallest radii sum, and
+    // nothing can tunnel between checks. The moment a pass resolves
+    // a contact the pass goes HOT — every substep — for 0.25 s, so
+    // a crash fold in progress is resolved at the full 480 Hz rate.
+    // v2.7.1: the cold cadence is ALSO gated on internal speed
+    // (_scFastRelative): during a crash approach no contact has
+    // registered yet, but set members are already closing at 20+
+    // m/s, and at 240 Hz that is 8+ cm between checks — enough to
+    // cross a fine panel's interaction shell. While anything in
+    // the set moves fast relative to the set mean, the pass runs
+    // every substep, contact or not. Measured: the pass is
     // ~165 us at 500 nodes; at half cadence its amortised cost is
     // inside the +15% perf bar against the pre-self-collision core,
     // at full cadence it was not.
-    if (this._scHotT > 0) this._scHotT--;
-    else { this._scTick++; if (this._scTick & 1) return; }
+    // the stretched-beam pseudo build below is gated on the same
+    // signals (buildPseudo): it runs while the pass is hot (a
+    // contact in the last 0.25 s) or while internal speeds are
+    // crash-like. In clean driving neither holds — measured zero
+    // beams past the 1.15x stretch threshold in a 10 s drive at
+    // both 500 and 1000 nodes — and skipping the scan keeps the
+    // pass at its v2.7 cost there.
+    let buildPseudo = false;
+    if (this._scHotT > 0){ this._scHotT--; buildPseudo = true; }
+    else {
+      this._scTick++;
+      const fast = this._scFastRelative();
+      if ((this._scTick & 1) && !fast) return;
+      buildPseudo = fast;
+    }
     const nodes = this.nodes, n = nodes.length;
-    const rad = this._scRad, inSet = this._scInSet, invM = this._scInvM;
+    const inSet = this._scInSet;
+    // particle-space radius / inverse mass: slots [0, n) mirror the
+    // per-node arrays; slots [n, n + nPseudo) are the stretched-beam
+    // midpoints built below. The pair loops read only these.
+    const rad = this._scRadP, invM = this._scInvMP;
+    rad.set(this._scRad); invM.set(this._scInvM);
     const P = this._scPos, V = this._scVel;
     const maskBits = this._scMaskBits, MW = this._scMaskWords;
     // bounding box of the set members (anchors the grid)
@@ -2087,26 +2216,6 @@ class SoftBodyCar {
     counts.fill(0, 0, ncells);
     const inv = 1/cell;
     const isBig = this._scIsBig;
-    for (let i=0;i<n;i++){
-      if (!inSet[i] || isBig[i]) continue;
-      const p = nodes[i].pos;
-      let ix = Math.floor((p.x-mnx)*inv); if (ix >= dxn) ix = dxn-1;
-      let iy = Math.floor((p.y-mny)*inv); if (iy >= dyn) iy = dyn-1;
-      let iz = Math.floor((p.z-mnz)*inv); if (iz >= dzn) iz = dzn-1;
-      const c = ix + dxn*(iy + dyn*iz);
-      cellOf[i] = c; counts[c]++;
-    }
-    let run = 0, nocc = 0;
-    for (let c=0;c<ncells;c++){
-      const k = counts[c]; counts[c] = run; run += k;
-      if (k > 0) occ[nocc++] = c;
-    }
-    counts[ncells] = run;
-    cursor.set(counts.subarray(0, ncells+1));
-    for (let i=0;i<n;i++){
-      if (!inSet[i] || isBig[i]) continue;
-      order[cursor[cellOf[i]]++] = i;
-    }
     // fill the flat scratch arrays from the live nodes (set members
     // only — the pair loop and the write-back below touch exactly
     // this set, so non-set nodes, i.e. the wheels, are never read
@@ -2116,6 +2225,73 @@ class SoftBodyCar {
       const nd = nodes[i], i3 = i*3;
       P[i3] = nd.pos.x; P[i3+1] = nd.pos.y; P[i3+2] = nd.pos.z;
       V[i3] = nd.vel.x; V[i3+1] = nd.vel.y; V[i3+2] = nd.vel.z;
+    }
+    // v2.7.1 restricted node-vs-beam: a node can spear through the
+    // middle of a panel quad without ever coming within radii-sum
+    // of a corner node once the panel has stretched — the quad
+    // centre sits ~0.71x the (stretched) spacing from every corner,
+    // while the radii sum stays ~0.9x the UNstretched spacing.
+    // Measured on a two-panel rig: with spacing 0.30 m and radii
+    // 0.075 m (a @500-style panel stretched 1.75x), 6-7 of 15
+    // gap-aimed nodes passed clean through at 10-30 m/s with the
+    // node-node pass alone. The quad's diagonal beams cross at
+    // that centre, so a pseudo-particle at the midpoint of every
+    // STRETCHED beam (> 1.15x rest — holes only open once a panel
+    // has stretched; an unstretched car builds zero pseudo-
+    // particles and pays only this scan) closes the hole at a cost
+    // proportional to the damage. A pseudo resolves against a real
+    // node like a particle of mass 2x the endpoint mean (moving the
+    // midpoint by delta moves BOTH endpoints by delta); its
+    // correction is applied to both endpoints and to its own slot,
+    // keeping the slot the endpoints' midpoint. Pairs against a
+    // node within 2 hops of either endpoint are masked with the
+    // same bitset as node pairs; pseudo-pseudo pairs are skipped.
+    // The pseudo radius is the endpoints' mean radius, capped at
+    // the grid tier's radius so the cell-size invariant (cell >=
+    // every grid pair's interaction distance) is preserved.
+    let nPseudo = 0;
+    const pBeam = this._scPBeam, beamsL = this.beams;
+    for (let bi=0; buildPseudo && bi<beamsL.length; bi++){
+      const b = beamsL[bi];
+      if (b.broken) continue;
+      const a = b.a, bb = b.b;
+      if (!inSet[a] || !inSet[bb]) continue;
+      if (b.rest < 0.12) continue;
+      const a3 = a*3, b3 = bb*3;
+      const dx = P[b3]-P[a3], dy = P[b3+1]-P[a3+1], dz = P[b3+2]-P[a3+2];
+      const lim = b.rest*1.15;
+      if (dx*dx + dy*dy + dz*dz <= lim*lim) continue;
+      const idx = n + nPseudo, i3 = idx*3;
+      pBeam[nPseudo++] = bi;
+      let rm = 0.5*(rad[a] + rad[bb]);
+      if (rm > this._scRGrid) rm = this._scRGrid;
+      rad[idx] = rm;
+      invM[idx] = 0.25*(invM[a] + invM[bb]);
+      P[i3] = (P[a3]+P[b3])*0.5; P[i3+1] = (P[a3+1]+P[b3+1])*0.5; P[i3+2] = (P[a3+2]+P[b3+2])*0.5;
+      V[i3] = (V[a3]+V[b3])*0.5; V[i3+1] = (V[a3+1]+V[b3+1])*0.5; V[i3+2] = (V[a3+2]+V[b3+2])*0.5;
+    }
+    const nPart = n + nPseudo;
+    // grid insertion over particles: real set members (minus the
+    // big tier) plus every pseudo-particle, positions from P
+    for (let idx=0; idx<nPart; idx++){
+      if (idx < n && (!inSet[idx] || isBig[idx])) continue;
+      const i3 = idx*3;
+      let ix = Math.floor((P[i3]-mnx)*inv); if (ix >= dxn) ix = dxn-1;
+      let iy = Math.floor((P[i3+1]-mny)*inv); if (iy >= dyn) iy = dyn-1;
+      let iz = Math.floor((P[i3+2]-mnz)*inv); if (iz >= dzn) iz = dzn-1;
+      const c = ix + dxn*(iy + dyn*iz);
+      cellOf[idx] = c; counts[c]++;
+    }
+    let run = 0, nocc = 0;
+    for (let c=0;c<ncells;c++){
+      const k = counts[c]; counts[c] = run; run += k;
+      if (k > 0) occ[nocc++] = c;
+    }
+    counts[ncells] = run;
+    cursor.set(counts.subarray(0, ncells+1));
+    for (let idx=0; idx<nPart; idx++){
+      if (idx < n && (!inSet[idx] || isBig[idx])) continue;
+      order[cursor[cellOf[idx]]++] = idx;
     }
     // pair iteration over occupied cells: self + 13 forward
     // neighbours, each unordered pair exactly once
@@ -2149,7 +2325,20 @@ class SoftBodyCar {
             const dy = P[j3+1]-P[i3+1]; if (dy >= rs || dy <= -rs) continue;
             const dz = P[j3+2]-P[i3+2]; if (dz >= rs || dz <= -rs) continue;
             pairs++;
-            if (maskBits[i*MW + (j>>5)] & (1 << (j & 31))) continue;
+            // pseudo-particle pairs (v2.7.1): ea/eb become the
+            // pseudo's beam endpoints; the mask test is the node
+            // against BOTH endpoints (2-hop rule), and pseudo-
+            // pseudo pairs are meaningless and skipped
+            const iP = i >= n, jP = j >= n;
+            if (iP && jP) continue;
+            let ea = -1, eb = -1;
+            if (iP || jP){
+              const ndI = iP ? j : i;
+              const bObj = beamsL[pBeam[(iP ? i : j) - n]];
+              ea = bObj.a; eb = bObj.b;
+              if ((maskBits[ndI*MW + (ea>>5)] & (1 << (ea & 31))) ||
+                  (maskBits[ndI*MW + (eb>>5)] & (1 << (eb & 31)))) continue;
+            } else if (maskBits[i*MW + (j>>5)] & (1 << (j & 31))) continue;
             const d2 = dx*dx + dy*dy + dz*dz;
             if (d2 >= rs*rs) continue;
             contacts++;
@@ -2159,14 +2348,51 @@ class SoftBodyCar {
             else { ux = 1; uy = 0; uz = 0; pen = rs; } // coincident nodes: arbitrary axis
             const imJ = invM[j], imSum = imI + imJ;
             const wI = imI/imSum, wJ = imJ/imSum;
-            const corr = pen*0.55;
-            P[i3] -= ux*corr*wI; P[i3+1] -= uy*corr*wI; P[i3+2] -= uz*corr*wI;
-            P[j3] += ux*corr*wJ; P[j3+1] += uy*corr*wJ; P[j3+2] += uz*corr*wJ;
-            const vn = (V[j3]-V[i3])*ux + (V[j3+1]-V[i3+1])*uy + (V[j3+2]-V[i3+2])*uz;
-            if (vn < 0){
-              const lam = -vn*0.5;
-              V[i3] -= ux*lam*wI; V[i3+1] -= uy*lam*wI; V[i3+2] -= uz*lam*wI;
-              V[j3] += ux*lam*wJ; V[j3+1] += uy*lam*wJ; V[j3+2] += uz*lam*wJ;
+            // v2.7.1: the resolve fraction stiffens with depth —
+            // 0.55 at a graze (unchanged: resting contacts stay
+            // jitter-free) rising to 0.95 at full overlap, so a
+            // pair closing at crash speed (equilibrium penetration
+            // at a flat 0.55 measured ~0.5x the radii sum at @500)
+            // is pushed back out within a couple of substeps
+            // instead of riding deep inside the other panel
+            const corr = pen*(0.55 + 0.4*Math.min(1, pen/rs));
+            if (ea < 0){
+              P[i3] -= ux*corr*wI; P[i3+1] -= uy*corr*wI; P[i3+2] -= uz*corr*wI;
+              P[j3] += ux*corr*wJ; P[j3+1] += uy*corr*wJ; P[j3+2] += uz*corr*wJ;
+              const vn = (V[j3]-V[i3])*ux + (V[j3+1]-V[i3+1])*uy + (V[j3+2]-V[i3+2])*uz;
+              if (vn < 0){
+                const lam = -vn*0.5;
+                V[i3] -= ux*lam*wI; V[i3+1] -= uy*lam*wI; V[i3+2] -= uz*lam*wI;
+                V[j3] += ux*lam*wJ; V[j3+1] += uy*lam*wJ; V[j3+2] += uz*lam*wJ;
+              }
+            } else {
+              // node vs beam midpoint, worked in the node->pseudo
+              // frame (u flipped when the pseudo is i): the node
+              // takes its weight share; the pseudo's share lands on
+              // BOTH endpoints and on the pseudo slot, so the slot
+              // stays the endpoints' midpoint
+              const nI = iP ? j : i, pI = iP ? i : j;
+              const fx = iP ? -ux : ux, fy = iP ? -uy : uy, fz = iP ? -uz : uz;
+              const n3 = nI*3, p3 = pI*3, e3a = ea*3, e3b = eb*3;
+              const wN = iP ? wJ : wI, wP = iP ? wI : wJ;
+              P[n3] -= fx*corr*wN; P[n3+1] -= fy*corr*wN; P[n3+2] -= fz*corr*wN;
+              P[e3a] += fx*corr*wP; P[e3a+1] += fy*corr*wP; P[e3a+2] += fz*corr*wP;
+              P[e3b] += fx*corr*wP; P[e3b+1] += fy*corr*wP; P[e3b+2] += fz*corr*wP;
+              P[p3] += fx*corr*wP; P[p3+1] += fy*corr*wP; P[p3+2] += fz*corr*wP;
+              const vn = (V[p3]-V[n3])*fx + (V[p3+1]-V[n3+1])*fy + (V[p3+2]-V[n3+2])*fz;
+              if (vn < 0){
+                // beam contact is a hard stop, not a panel graze:
+                // the FULL approach velocity is killed (the node-
+                // node 0.5 factor would let a fast sheet's momentum,
+                // fed through its own stiff beams, re-accelerate the
+                // node through the shell within the few substeps
+                // the crossing window offers)
+                const lam = -vn;
+                V[n3] -= fx*lam*wN; V[n3+1] -= fy*lam*wN; V[n3+2] -= fz*lam*wN;
+                V[e3a] += fx*lam*wP; V[e3a+1] += fy*lam*wP; V[e3a+2] += fz*lam*wP;
+                V[e3b] += fx*lam*wP; V[e3b+1] += fy*lam*wP; V[e3b+2] += fz*lam*wP;
+                V[p3] += fx*lam*wP; V[p3+1] += fy*lam*wP; V[p3+2] += fz*lam*wP;
+              }
             }
           }
         }
@@ -2179,16 +2405,24 @@ class SoftBodyCar {
     for (let bi=0; bi<bigList.length; bi++){
       const i = bigList[bi], i3 = i*3;
       const ri = rad[i], imI = invM[i];
-      for (let j=0;j<n;j++){
-        if (!inSet[j] || j === i) continue;
-        if (isBig[j] && j < i) continue; // big-big already done from the smaller index
+      for (let j=0;j<nPart;j++){
+        if (j === i) continue;
+        if (j < n && !inSet[j]) continue;
+        if (j < n && isBig[j] && j < i) continue; // big-big already done from the smaller index
         const j3 = j*3;
         const rs = ri + rad[j];
         const dx = P[j3]-P[i3]; if (dx >= rs || dx <= -rs) continue;
         const dy = P[j3+1]-P[i3+1]; if (dy >= rs || dy <= -rs) continue;
         const dz = P[j3+2]-P[i3+2]; if (dz >= rs || dz <= -rs) continue;
         pairs++;
-        if (maskBits[i*MW + (j>>5)] & (1 << (j & 31))) continue;
+        // pseudo j (v2.7.1): mask is node i against both endpoints
+        let ea = -1, eb = -1;
+        if (j >= n){
+          const bObj = beamsL[pBeam[j - n]];
+          ea = bObj.a; eb = bObj.b;
+          if ((maskBits[i*MW + (ea>>5)] & (1 << (ea & 31))) ||
+              (maskBits[i*MW + (eb>>5)] & (1 << (eb & 31)))) continue;
+        } else if (maskBits[i*MW + (j>>5)] & (1 << (j & 31))) continue;
         const d2 = dx*dx + dy*dy + dz*dz;
         if (d2 >= rs*rs) continue;
         contacts++;
@@ -2198,14 +2432,32 @@ class SoftBodyCar {
         else { ux = 1; uy = 0; uz = 0; pen = rs; }
         const imJ = invM[j], imSum = imI + imJ;
         const wI = imI/imSum, wJ = imJ/imSum;
-        const corr = pen*0.55;
-        P[i3] -= ux*corr*wI; P[i3+1] -= uy*corr*wI; P[i3+2] -= uz*corr*wI;
-        P[j3] += ux*corr*wJ; P[j3+1] += uy*corr*wJ; P[j3+2] += uz*corr*wJ;
-        const vn = (V[j3]-V[i3])*ux + (V[j3+1]-V[i3+1])*uy + (V[j3+2]-V[i3+2])*uz;
-        if (vn < 0){
-          const lam = -vn*0.5;
-          V[i3] -= ux*lam*wI; V[i3+1] -= uy*lam*wI; V[i3+2] -= uz*lam*wI;
-          V[j3] += ux*lam*wJ; V[j3+1] += uy*lam*wJ; V[j3+2] += uz*lam*wJ;
+        // resolve fraction stiffens with depth (see the grid tier)
+        const corr = pen*(0.55 + 0.4*Math.min(1, pen/rs));
+        if (ea < 0){
+          P[i3] -= ux*corr*wI; P[i3+1] -= uy*corr*wI; P[i3+2] -= uz*corr*wI;
+          P[j3] += ux*corr*wJ; P[j3+1] += uy*corr*wJ; P[j3+2] += uz*corr*wJ;
+          const vn = (V[j3]-V[i3])*ux + (V[j3+1]-V[i3+1])*uy + (V[j3+2]-V[i3+2])*uz;
+          if (vn < 0){
+            const lam = -vn*0.5;
+            V[i3] -= ux*lam*wI; V[i3+1] -= uy*lam*wI; V[i3+2] -= uz*lam*wI;
+            V[j3] += ux*lam*wJ; V[j3+1] += uy*lam*wJ; V[j3+2] += uz*lam*wJ;
+          }
+        } else {
+          // node i vs beam midpoint j (u already points node->pseudo)
+          const e3a = ea*3, e3b = eb*3;
+          P[i3] -= ux*corr*wI; P[i3+1] -= uy*corr*wI; P[i3+2] -= uz*corr*wI;
+          P[e3a] += ux*corr*wJ; P[e3a+1] += uy*corr*wJ; P[e3a+2] += uz*corr*wJ;
+          P[e3b] += ux*corr*wJ; P[e3b+1] += uy*corr*wJ; P[e3b+2] += uz*corr*wJ;
+          P[j3] += ux*corr*wJ; P[j3+1] += uy*corr*wJ; P[j3+2] += uz*corr*wJ;
+          const vn = (V[j3]-V[i3])*ux + (V[j3+1]-V[i3+1])*uy + (V[j3+2]-V[i3+2])*uz;
+          if (vn < 0){
+            const lam = -vn; // full kill, as in the grid tier
+            V[i3] -= ux*lam*wI; V[i3+1] -= uy*lam*wI; V[i3+2] -= uz*lam*wI;
+            V[e3a] += ux*lam*wJ; V[e3a+1] += uy*lam*wJ; V[e3a+2] += uz*lam*wJ;
+            V[e3b] += ux*lam*wJ; V[e3b+1] += uy*lam*wJ; V[e3b+2] += uz*lam*wJ;
+            V[j3] += ux*lam*wJ; V[j3+1] += uy*lam*wJ; V[j3+2] += uz*lam*wJ;
+          }
         }
       }
     }
@@ -2440,6 +2692,7 @@ class SoftBodyCar {
     // per-evaluation read below is an array slot, not a property
     // chain — the arithmetic itself is unchanged
     const bkA = this._bk, bcA = this._bc, bydA = this._byd, bprA = this._bpr,
+          breA = this._brest,
           beLA = this._beL, be2A = this._be2, bsupA = this._bsup, bfilA = this._bfil,
           bfaA = this._bfa, bfbA = this._bfb,
           bpA = this._bpA, bvA = this._bvA, bpB = this._bpB, bvB = this._bvB;
@@ -2490,6 +2743,11 @@ class SoftBodyCar {
           const adisp = Math.abs(disp);
           const yd = bydA[bi];
           if (adisp > yd) f += (disp < 0 ? -1 : 1) * bkA[bi] * (adisp - yd);
+          // v2.7.1 tension strain-stiffening (see beamAxialForce —
+          // the two copies must stay in sync): past 1.30x the
+          // ORIGINAL rest length, +2x k on the excess, tension only
+          const overS = L - breA[bi] * 1.3;
+          if (overS > 0) f += bkA[bi] * overS * 2;
           const pr = bprA[bi];
           if (pr > 0 && disp < 0){
             const ratio = b.currentRest/L - 1;
@@ -2713,8 +2971,14 @@ class SoftBodyCar {
       }
     }
     // hard beam displacement limit, applied after the beams have moved
-    // the nodes and before contacts resolve — see enforceBeamLimits
-    this.enforceBeamLimits();
+    // the nodes and before contacts resolve — see enforceBeamLimits.
+    // The projection count is remembered: the end-of-substep clamp
+    // below only needs to run when something in this substep could
+    // have pushed a beam past its bound (v2.7.1 perf: an unconditional
+    // second full scan every substep cost ~+25% on the @1000 drive
+    // loop, where in clean driving nothing ever projects).
+    const midProj = this.enforceBeamLimits();
+    const scBefore = this.scContacts, hitsBefore = this.groundHits + this.obstacleHits;
     // self-collision: panels of this same car may not pass through
     // each other — once per substep, see selfCollide
     this.selfCollide();
@@ -2778,6 +3042,31 @@ class SoftBodyCar {
           }
         }
       }
+    }
+    // v2.7.1: second displacement clamp, at the very end of the
+    // substep. The mid-substep clamp bounds what the force pass
+    // sees, but self-collision, ground and obstacle resolves all
+    // run AFTER it and move nodes positionally by centimetres —
+    // on a 0.10 m beam a 4 cm contact correction is 0.4 of strain,
+    // so the state the world (and the renderer) actually saw could
+    // sit far outside the bound (measured: @500 wall crash peak
+    // tensile 1.78x and peak compressive 0.20x against a 1.55x /
+    // 0.45x clamp). Re-clamping here makes "an unbroken beam sits
+    // within its clampDisp of rest" an invariant of every completed
+    // substep; the pass is a squared-distance precheck over the
+    // beams and is a strict no-op for the overwhelming majority.
+    // Two sweeps here (see _enforceSweep): one sweep's Gauss-Seidel
+    // residue left single beams at 1.58x / 0.32x against the bound.
+    // The run is CONDITIONAL (see midProj above): it fires when
+    // the mid-substep clamp projected anything, when self-collision
+    // resolved a contact, or when a hard ground/obstacle hit was
+    // counted this substep — exactly the events that can shove a
+    // beam past its bound. In clean driving none of them fire and
+    // the second scan costs nothing; in a crash all of them fire
+    // constantly and the invariant holds every substep.
+    if (midProj > 0 || this.scContacts !== scBefore ||
+        (this.groundHits + this.obstacleHits) !== hitsBefore){
+      this.enforceBeamLimits(2);
     }
   }
 }
