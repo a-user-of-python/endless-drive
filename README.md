@@ -5,6 +5,42 @@
 An endless, randomly generating road with smooth, blended turns — and cars
 built the way BeamNG builds them: out of **nodes and beams**.
 
+## What changed in v2.7.1
+
+- **BeamNG terrain import fixed.** The .ter reader was rewritten to the
+  real v9 layout (5-byte header, strict size-equation validation — a
+  wrong file now fails loudly instead of "validating" into spiked
+  garbage). Terrain scale comes from the level's TerrainBlock in its
+  *.level.json files (all of them are scanned), theTerrain.terrain.json
+  is read and cross-checked, and whatever the files don't pin is
+  resolved by a scored combination search whose winner and scores are
+  recorded in the load report. Level items (spawns, decal roads,
+  statics, forest) are converted in the same orientation as the
+  terrain — previously they landed mirrored north↔south. Terrain
+  holes (layer 0xFF) are parsed and skipped by the renderer.
+- **Overstretch bounded.** A beam's positional clamp is now capped at
+  min(break strain, 0.55) × rest for every beam (support beams
+  previously had no limit at all and were the worst offenders), the
+  clamp runs a second sweep at the end of the substep, and tension
+  stiffens past 1.30× rest. Measured, 100 km/h wall crash: worst peak
+  tensile strain 1.89× → 1.59×, worst compression 0.09× → 0.41×.
+  Stretched panels also grow midpoint collision particles, closing
+  the quad-centre hole, and the self-collision pass runs at full rate
+  whenever parts of the car move fast relative to each other, not
+  only after a contact.
+- **Multiplayer room codes are 5 characters** (PeerJS broker,
+  e.g. `K7QX2`), shown large inside the loading panel with a copy
+  button while hosting. The old long-code manual flow remains as a
+  fallback if the broker is unreachable. Two v2.7 connection bugs
+  were fixed along the way (manual-transport joiners could never
+  connect; a message-ordering race could wipe content verification).
+- **Known issue (being patched):** a rigid side panel slammed
+  sideways can still thread between the cabin's nodes without
+  registering self-collision contacts (the panel neither stretches
+  nor breaks, so no midpoint particles form). Wall crashes, folds
+  and drops are covered; this specific panel-threading case is the
+  next patch, along with layered detailed error reporting.
+
 ## What changed in v2.7
 
 - **Self-collision with layers.** Every node carries a collision group
