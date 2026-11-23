@@ -193,22 +193,31 @@
     </div>
     <div class="menuSection">
       <h2>MULTIPLAYER</h2>
-      <div class="hint">Two players, no server: the host shares a join code, the joiner answers with a reply code. Both players must drive the same map and car — imported zips are hash-checked.</div>
+      <div class="hint">Two players: the host gets a 5-character room code, the joiner types it in. Both players must drive the same map and car — imported zips are hash-checked after you connect.</div>
       <div class="mpPanel">
         <div class="menuRow">
           <button class="mpBtn" id="mpHostBtn" type="button">Host a game</button>
-          <button class="mpBtn" id="mpJoinBtn" type="button">Join with code</button>
+          <span class="mpRoomLbl">— you get a 5-character room code to share</span>
+        </div>
+        <div class="menuRow">
+          <input id="mpRoomIn" class="mpRoomIn" type="text" maxlength="7" autocomplete="off"
+                 autocapitalize="characters" spellcheck="false" placeholder="ABCDE"
+                 aria-label="Room code — 5 characters">
+          <button class="mpBtn" id="mpJoinBtn" type="button">Join room</button>
           <button class="mpBtn" id="mpRecheckBtn" type="button" disabled>Re-check content</button>
           <button class="mpBtn" id="mpDisconnectBtn" type="button" disabled>Disconnect</button>
         </div>
-        <label for="mpCodeIn">Paste a code (host's join code if you are joining, or the joiner's reply code if you are hosting)</label>
-        <textarea id="mpCodeIn" spellcheck="false" placeholder="Paste code here…"></textarea>
-        <div class="menuRow">
-          <button class="mpBtn" id="mpApplyBtn" type="button">Apply pasted code</button>
-        </div>
-        <label for="mpCodeOut">Your code to share (join code if hosting, reply code if joining)</label>
-        <textarea id="mpCodeOut" readonly spellcheck="false" placeholder="Your code appears here…"></textarea>
         <div id="mpStatus">Multiplayer: not connected</div>
+        <details class="mpFallback">
+          <summary>Long codes (fallback — only if the room-code service is unreachable)</summary>
+          <label for="mpCodeIn">Paste a long code (host's join code if you are joining, or the joiner's reply code if you are hosting)</label>
+          <textarea id="mpCodeIn" spellcheck="false" placeholder="Paste long code here…"></textarea>
+          <div class="menuRow">
+            <button class="mpBtn" id="mpApplyBtn" type="button">Apply pasted code</button>
+          </div>
+          <label for="mpCodeOut">Your long code to share (join code if hosting, reply code if joining)</label>
+          <textarea id="mpCodeOut" readonly spellcheck="false" placeholder="Your long code appears here…"></textarea>
+        </details>
       </div>
     </div>
     <div class="menuSection">
@@ -261,6 +270,17 @@ if (!window.THREE){
     'The three.js 3D library failed to load, so the game cannot start. ' +
     'Check your internet connection and any script blocker, then reload the page.',
     'window.THREE is undefined after both CDN attempts');
+}
+</script>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+/* PeerJS brokers the multiplayer handshake so room codes can be 5
+   characters. Same fallback pattern as three.js above. If BOTH CDNs
+   fail, window.Peer stays undefined and multiplayer falls back to the
+   long copy-paste codes — that is a supported mode, not an error, so
+   no error box here. */
+if (!window.Peer){
+  document.write('<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"><\/script>');
 }
 </script>
 <script src="js/sim/core.js"></script>
