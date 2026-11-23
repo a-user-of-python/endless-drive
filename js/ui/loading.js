@@ -14,6 +14,22 @@
                                     stays where the work actually stopped
      LoadingScreen.onBack = fn      optional hook run when Back is pressed
      LoadingScreen.isOpen()         whether the overlay is visible
+     LoadingScreen.setRoomCode(code, label)
+                                    show the ROOM CODE SLOT (below)
+     LoadingScreen.clearRoomCode()  hide the room code slot
+     LoadingScreen.showBack(label)  show the Back button during a wait
+                                    (not only on fail) with a custom
+                                    label, e.g. 'Cancel' or 'Menu'
+
+   ROOM CODE SLOT — INVARIANT (v2.7.1): the multiplayer room code is
+   rendered INSIDE this panel, in large type with a copy button, above
+   the progress bar and log, for the entire setup. It is never left in
+   the menu underneath this overlay (in v2.7 the host's code sat in a
+   menu textarea the overlay covered — the bug this slot fixes). A
+   short code (<= 8 chars) renders as huge text; a long manual code
+   renders in a selectable box with the same copy button. For a join
+   in progress the slot names the room ("JOINING ROOM XXXXX") so the
+   target stays visible while attempts narrate in the log below.
 
    The log keeps the last ~40 lines in the DOM (the box itself shows the
    most recent ~8 and scrolls); every stage() message is also logged, so
@@ -26,6 +42,7 @@
   var els = null;
   var t0 = 0;
   var lastFrac = 0;
+  var roomCodeValue = '';
 
   function build(){
     if (els) return els;
@@ -35,6 +52,14 @@
     root.innerHTML =
       '<div class="loadCard">' +
         '<div class="loadTitle" id="loadTitle">Loading</div>' +
+        '<div id="loadRoom" class="loadRoom hidden">' +
+          '<div id="loadRoomLabel" class="loadRoomLabel">ROOM CODE</div>' +
+          '<div class="loadRoomRow">' +
+            '<div id="loadRoomBig" class="loadRoomBig"></div>' +
+            '<textarea id="loadRoomLong" class="loadRoomLong hidden" readonly spellcheck="false"></textarea>' +
+            '<button id="loadRoomCopy" class="loadRoomCopy" type="button">Copy</button>' +
+          '</div>' +
+        '</div>' +
         '<div class="barOuter loadBarOuter"><div id="loadBar" class="barInner loadBar"></div></div>' +
         '<div id="loadStatus" class="loadStatus">Starting…</div>' +
         '<div id="loadLog" class="loadLog" aria-live="polite"></div>' +
@@ -49,8 +74,39 @@
       status: root.querySelector('#loadStatus'),
       log: root.querySelector('#loadLog'),
       err: root.querySelector('#loadErr'),
-      back: root.querySelector('#loadBack')
+      back: root.querySelector('#loadBack'),
+      room: root.querySelector('#loadRoom'),
+      roomLabel: root.querySelector('#loadRoomLabel'),
+      roomBig: root.querySelector('#loadRoomBig'),
+      roomLong: root.querySelector('#loadRoomLong'),
+      roomCopy: root.querySelector('#loadRoomCopy')
     };
+    els.roomCopy.addEventListener('click', function(){
+      var code = roomCodeValue;
+      if (!code) return;
+      var doneCopy = function(){
+        els.roomCopy.textContent = 'Copied!';
+        setTimeout(function(){ els.roomCopy.textContent = 'Copy'; }, 1400);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(code).then(doneCopy, function(){ fallbackCopy(doneCopy); });
+      } else fallbackCopy(doneCopy);
+    });
+    function fallbackCopy(doneCopy){
+      // clipboard API unavailable (file://, old browser): select the
+      // text so a manual Ctrl+C works, and try execCommand as well.
+      try {
+        if (els.roomLong.classList.contains('hidden')){
+          var r = document.createRange();
+          r.selectNodeContents(els.roomBig);
+          var sel = window.getSelection();
+          sel.removeAllRanges(); sel.addRange(r);
+        } else {
+          els.roomLong.focus(); els.roomLong.select();
+        }
+        if (document.execCommand && document.execCommand('copy')) doneCopy();
+      } catch (e) { /* selection alone still leaves the code copyable */ }
+    }
     els.back.addEventListener('click', function(){
       var fn = window.LoadingScreen && window.LoadingScreen.onBack;
       done();
@@ -77,8 +133,50 @@
     e.err.textContent = '';
     e.err.classList.add('hidden');
     e.back.classList.add('hidden');
+    e.back.textContent = 'Back';
+    clearRoomCode();
     e.root.classList.remove('hidden');
     log('— ' + (title || 'Loading') + ' —');
+  }
+
+  /* Room code slot: see the INVARIANT note at the top of this file.
+     The slot sits above the bar/log and is never reset by stage() or
+     log(), so the code stays visible for the whole setup. */
+  function setRoomCode(code, label){
+    var e = build();
+    if (!code){ clearRoomCode(); return; }
+    roomCodeValue = String(code);
+    e.roomLabel.textContent = label || 'ROOM CODE';
+    if (roomCodeValue.length <= 8){
+      e.roomBig.textContent = roomCodeValue;
+      e.roomBig.classList.remove('hidden');
+      e.roomLong.classList.add('hidden');
+      e.roomCopy.classList.remove('hidden');
+    } else {
+      e.roomLong.value = roomCodeValue;
+      e.roomLong.classList.remove('hidden');
+      e.roomBig.classList.add('hidden');
+      e.roomCopy.classList.remove('hidden');
+    }
+    e.room.classList.remove('hidden');
+  }
+
+  function clearRoomCode(){
+    var e = build();
+    roomCodeValue = '';
+    e.roomBig.textContent = '';
+    e.roomLong.value = '';
+    e.room.classList.add('hidden');
+  }
+
+  /* Show the Back button during a wait (hosting / joining), with a
+     caller-chosen label. Pressing it closes the overlay and runs
+     LoadingScreen.onBack — the caller decides what that means
+     (cancel a join, or just return to the menu while hosting). */
+  function showBack(label){
+    var e = build();
+    if (label) e.back.textContent = label;
+    e.back.classList.remove('hidden');
   }
 
   function stage(frac, msg){
@@ -115,6 +213,7 @@
     e.err.textContent = msg || 'Something went wrong.';
     e.err.classList.remove('hidden');
     e.status.textContent = 'Stopped — see the error below.';
+    e.back.textContent = 'Back';
     e.back.classList.remove('hidden');
     e.root.classList.remove('hidden');
     log('FAILED: ' + (msg || 'unknown error'));
@@ -122,6 +221,8 @@
 
   window.LoadingScreen = {
     show: show, stage: stage, log: log, done: done, fail: fail,
+    setRoomCode: setRoomCode, clearRoomCode: clearRoomCode, showBack: showBack,
+    roomCode: function(){ return roomCodeValue; },
     onBack: null,
     isOpen: function(){ return !!(els && !els.root.classList.contains('hidden')); },
     frac: function(){ return lastFrac; }
