@@ -222,7 +222,13 @@ function readInput(){
 window.addEventListener('keydown', e=>{
   if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
   keys[e.code] = true;
-  if (!started){ if (e.code === 'Enter') startGame(); return; }
+  if (!started){
+    // Enter in a menu text field (room code, long-code boxes) is the
+    // field's own action, not "start the game".
+    const tag = e.target && e.target.tagName;
+    if (e.code === 'Enter' && tag !== 'INPUT' && tag !== 'TEXTAREA') startGame();
+    return;
+  }
   if (e.code === 'KeyP' || e.code === 'Escape'){ togglePause(); return; }
   if (paused) return;
   if (e.code === 'KeyC'){ camMode = (camMode+1)%3; $('freeBox').classList.toggle('hidden', camMode!==2);
@@ -322,6 +328,7 @@ function importModulesReady(kind){
   return false;
 }
 async function importCarZip(file){
+  LoadingScreen.onBack = null; // an import's Back must never run an MP cancel hook
   LoadingScreen.show('Importing car — ' + file.name);
   if (!importModulesReady('car')){
     LoadingScreen.fail('The BeamNG import modules are not loaded in this build, so cars cannot be imported yet.');
@@ -374,6 +381,7 @@ function selectImportedCar(entry, el){
   updateMpLocalContent();
 }
 async function importMapZip(file){
+  LoadingScreen.onBack = null; // an import's Back must never run an MP cancel hook
   LoadingScreen.show('Importing map — ' + file.name);
   if (!importModulesReady('map')){
     LoadingScreen.fail('The BeamNG import modules are not loaded in this build, so maps cannot be imported yet.');
@@ -472,8 +480,19 @@ function wireMultiplayer(){
     $('mpStatusLine').classList.toggle('hidden', !(started && st.connected));
     if (st.connected) $('mpStatusLine').textContent = 'Multiplayer: connected — peer is in your game';
   };
-  M.onCode = code=>{ $('mpCodeOut').value = code; };
+  M.onCode = (code, kind)=>{
+    // INVARIANT (v2.7.1): a code the player must read or copy is shown
+    // INSIDE the loading panel while it is open (LoadingScreen room
+    // slot), never only in the menu underneath the overlay.
+    if (LoadingScreen.isOpen()){
+      LoadingScreen.setRoomCode(code, kind === 'room' ? 'ROOM CODE — give this to your friend'
+        : kind === 'reply' ? 'REPLY CODE — send this to the host'
+        : 'JOIN CODE — send this to your friend');
+    }
+    if (kind !== 'room') $('mpCodeOut').value = code;
+  };
   M.onConnected = ()=>{
+    LoadingScreen.onBack = null;
     LoadingScreen.done();
     $('mpRecheckBtn').disabled = false;
     toast('Multiplayer: joined', 1800);
@@ -491,27 +510,76 @@ function wireMultiplayer(){
   $('mpHostBtn').onclick = ()=>{
     updateMpLocalContent();
     LoadingScreen.show('Multiplayer — hosting');
+    // Back just returns to the menu; hosting continues in the
+    // background (the room code / offer stays valid).
+    LoadingScreen.onBack = null;
+    LoadingScreen.showBack('Menu');
     M.host().then(code=>{
-      $('mpCodeOut').value = code;
-      LoadingScreen.stage(0.4, 'Join code ready — share it, then paste the reply code in the menu and press Apply');
-      LoadingScreen.log('waiting for a reply code…');
+      if (M.state.transport === 'peerjs'){
+        LoadingScreen.setRoomCode(code, 'ROOM CODE — give this to your friend');
+        LoadingScreen.stage(0.4, 'Room code ready — waiting for your friend to join…');
+      } else {
+        $('mpCodeOut').value = code;
+        LoadingScreen.setRoomCode(code, 'LONG JOIN CODE — copy and share it');
+        LoadingScreen.stage(0.4, 'Long join code ready — share it, then paste the reply code in the menu and press Apply');
+        LoadingScreen.log('waiting for a reply code…');
+      }
     }).catch(err=>LoadingScreen.fail('Hosting failed: ' + ((err && err.message) || err)));
   };
+  /* Room-code join: the code entry lives in the menu (#mpRoomIn) and
+     is never cleared by the flow, so cancelling the loading panel
+     returns to the still-filled input. The loading panel names the
+     room being joined in its room slot for the whole attempt. */
+  function startRoomJoin(code){
+    updateMpLocalContent();
+    LoadingScreen.show('Multiplayer — joining');
+    LoadingScreen.setRoomCode(code, 'JOINING ROOM');
+    LoadingScreen.onBack = ()=>{ M.disconnect(); toast('Join cancelled', 1400); };
+    LoadingScreen.showBack('Cancel');
+    M.join(code).then(()=>{
+      // 'connected' is handled by onConnected
+    }).catch(err=>{
+      LoadingScreen.onBack = null;
+      LoadingScreen.fail('Join failed: ' + ((err && err.message) || err) +
+        ' — check the code, or ask the host for a long code and paste it under "Long codes" in the menu.');
+    });
+  }
+  $('mpRoomIn').addEventListener('input', ()=>{
+    const el = $('mpRoomIn');
+    const cleaned = el.value.toUpperCase().replace(/[\s-]+/g, '');
+    if (cleaned !== el.value) el.value = cleaned;
+  });
+  $('mpRoomIn').addEventListener('keydown', e=>{
+    if (e.code === 'Enter'){ e.preventDefault(); e.stopPropagation(); $('mpJoinBtn').click(); }
+  });
   $('mpJoinBtn').onclick = ()=>{
-    $('mpCodeIn').focus();
-    toast('Paste the host\'s join code, then press "Apply pasted code"', 2400);
+    const code = M.normalizeRoomCode($('mpRoomIn').value);
+    if (!code){
+      $('mpRoomIn').focus();
+      toast('Enter the 5-character room code first', 2000);
+      return;
+    }
+    $('mpRoomIn').value = code;
+    startRoomJoin(code);
   };
   $('mpApplyBtn').onclick = ()=>{
     const code = $('mpCodeIn').value.trim();
     if (!code){ toast('Paste a code first', 1600); return; }
+    const room = M.normalizeRoomCode(code);
+    if (M.state.mode !== 'host' && room){ startRoomJoin(room); return; }
     if (M.state.mode === 'host'){
       LoadingScreen.show('Multiplayer — connecting');
+      LoadingScreen.onBack = null;
+      LoadingScreen.showBack('Menu');
       M.acceptReply(code).catch(err=>LoadingScreen.fail('Connect failed: ' + ((err && err.message) || err)));
     } else {
       updateMpLocalContent();
       LoadingScreen.show('Multiplayer — joining');
+      LoadingScreen.onBack = null;
+      LoadingScreen.showBack('Menu');
       M.join(code).then(reply=>{
         $('mpCodeOut').value = reply;
+        LoadingScreen.setRoomCode(reply, 'REPLY CODE — send this to the host');
         LoadingScreen.stage(0.5, 'Reply code ready — send it to the host');
         LoadingScreen.log('waiting for the host to connect…');
       }).catch(err=>{
