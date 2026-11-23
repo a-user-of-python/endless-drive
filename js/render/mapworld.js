@@ -65,6 +65,9 @@
     const vertsPerSide = Math.floor((N-1)/step) + 1;
     const pos = new Float32Array(vertsPerSide*vertsPerSide*3);
     const col = new Float32Array(vertsPerSide*vertsPerSide*3);
+    // per-vertex hole flags (layer byte 0xFF in the .ter): a triangle
+    // whose corners are ALL holes is not drawn (see the index loop).
+    const hole = new Uint8Array(vertsPerSide*vertsPerSide);
     const cGrass = [0.36, 0.47, 0.24], cDry = [0.55, 0.48, 0.30],
           cRock = [0.42, 0.40, 0.38], cHigh = [0.75, 0.73, 0.70];
     let p = 0;
@@ -73,6 +76,7 @@
         const x = (i*step/(N-1) - 0.5) * W;
         const z = (j*step/(N-1) - 0.5) * W;
         const h = hf.heightAt(x, z);
+        if (hf.holeGrid) hole[j*vertsPerSide + i] = hf.holeGrid[(j*step)*N + i*step];
         pos[p] = x; pos[p+1] = h; pos[p+2] = z;
         // slope from the heightfield's own ground probe
         const e = W/(N-1)*step;
@@ -91,7 +95,8 @@
     for (let j = 0; j < vertsPerSide-1; j++){
       for (let i = 0; i < vertsPerSide-1; i++){
         const a = j*vertsPerSide + i, b = a + 1, c = a + vertsPerSide, d = c + 1;
-        idx.push(a, c, b, b, c, d);
+        if (!(hole[a] && hole[c] && hole[b])) idx.push(a, c, b);
+        if (!(hole[b] && hole[c] && hole[d])) idx.push(b, c, d);
       }
     }
     const geo = new THREE.BufferGeometry();
