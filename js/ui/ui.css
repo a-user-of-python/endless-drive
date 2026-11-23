@@ -44,6 +44,14 @@
   background: rgba(0,0,0,.4); color: #eef2f6; border: 1px solid rgba(255,255,255,.25);
   border-radius: 8px; padding: 7px 9px; font-family: Consolas, monospace; font-size: 12px; }
 #mpStatus { font-size: 16px; font-weight: 700; color: #ffd94d; margin-top: 8px; min-height: 20px; }
+.mpPanel .mpRoomIn { width: 190px; box-sizing: border-box; background: rgba(0,0,0,.4);
+  color: #ffd94d; border: 1px solid rgba(255,255,255,.3); border-radius: 8px;
+  padding: 8px 12px; font-family: Consolas, monospace; font-size: 24px; font-weight: 800;
+  letter-spacing: 6px; text-transform: uppercase; }
+.mpPanel .mpRoomIn::placeholder { color: #5f7183; letter-spacing: 6px; }
+.mpPanel .mpRoomLbl { font-size: 15px; color: #9fb2c2; }
+.mpPanel details.mpFallback { margin-top: 10px; }
+.mpPanel details.mpFallback > summary { font-size: 15px; color: #9fb2c2; cursor: pointer; }
 #mpStatusLine { position: absolute; top: 22px; left: 50%; transform: translateX(-50%);
   font-size: 15px; font-weight: 700; color: #8fd0ff; text-shadow: 0 1px 6px rgba(0,0,0,.8); }
 
@@ -81,6 +89,21 @@
 .loadBtns { margin-top: 12px; text-align: right; }
 .loadBackBtn { background: #1d6fd1; color: #fff; border: none; font-size: 16px; font-weight: 700;
   padding: 9px 22px; border-radius: 8px; cursor: pointer; }
+
+/* Room code slot INSIDE the loading panel (v2.7.1 invariant: the code
+   is never underneath the overlay — it renders here, above the bar). */
+.loadRoom { background: rgba(29,111,209,.14); border: 1px solid #1d6fd1; border-radius: 10px;
+  padding: 10px 14px 12px 14px; margin-bottom: 14px; }
+.loadRoomLabel { font-size: 14px; font-weight: 700; letter-spacing: 2px; color: #8fd0ff; }
+.loadRoomRow { display: flex; align-items: center; gap: 14px; margin-top: 4px; }
+.loadRoomBig { font-family: Consolas, monospace; font-size: 52px; font-weight: 800;
+  letter-spacing: 10px; color: #ffd94d; line-height: 1.05; user-select: all; }
+.loadRoomLong { flex: 1; min-height: 52px; resize: vertical; background: rgba(0,0,0,.4);
+  color: #eef2f6; border: 1px solid rgba(255,255,255,.25); border-radius: 8px;
+  padding: 7px 9px; font-family: Consolas, monospace; font-size: 12px; }
+.loadRoomCopy { background: #1d6fd1; color: #fff; border: none; font-size: 17px; font-weight: 700;
+  padding: 10px 20px; border-radius: 8px; cursor: pointer; white-space: nowrap; }
+.loadRoomCopy:hover { background: #2a80e8; }
 
 /* ---------- part chips: transient, loss-only, corner stack ---------- */
 #partChips { position: fixed; right: 22px; bottom: 190px; z-index: 6; display: flex;
