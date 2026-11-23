@@ -5,6 +5,44 @@
 An endless, randomly generating road with smooth, blended turns — and cars
 built the way BeamNG builds them: out of **nodes and beams**.
 
+## What changed in v2.7.2
+
+- **Self-collision: the real hole closed, and a correction.** The
+  v2.7.1 "known issue" below was re-measured in the car's own frame:
+  the test press actually rolls the car over, and the panel arcs over
+  the roof — it never enters the cabin (opposite panel nodes stay
+  ~1.58 m apart throughout; with the car restrained so it cannot
+  roll, the panel advances ≤0.04 m and stops). The genuine hole was
+  the neighbouring one: a node spearing through the *middle of an
+  unstretched sheet* (long beams / quad centres), where no midpoint
+  particle existed because nothing had stretched yet. Beam-midpoint
+  collision particles are now built for every eligible beam whenever
+  the self-collision pass is engaged, guarded by a rest-clearance
+  rule (a node born inside a beam's midpoint radius is structure,
+  not an incursion) and a proximity latch that pre-engages the pass
+  only for pairs actually closing (≥0.75 m/s) — clean driving never
+  engages it (measured: 0 latch calls in 10 s drives at 500 and 1000
+  nodes). Node↔midpoint contacts also drag tangentially, like real
+  folded panels. Measured: spear rigs 0/8 through (controls 8/8);
+  roof-press recovery after release: roof nodes left below the floor
+  89 → 2, worst penetration 1.23 m → 0.13 m; drive cost +5.5% @500 /
+  +7.3% @1000 nodes vs v2.7.
+- **Errors say what actually went wrong.** A failure now reports in
+  layers: a plain-words headline, where it happened (the import
+  stage and the exact file inside the zip), why (the real message,
+  with actual-vs-expected values kept), a fix hint when one honestly
+  applies, and the technical detail. The generic "Script error."
+  banner is gone — unexpected errors show the real message, the top
+  stack frames, and what the game was doing at the time. Multiplayer
+  content mismatches name both zip hashes so "same name, different
+  file" is visible at a glance.
+- **The map load report shows the terrain decision.** Grid and world
+  size, maxHeight and squareSize *with where each value came from*
+  (TerrainBlock, terrain.json, or the scored search), hole count,
+  spawn ground error, and the full warnings list. The loading screen
+  also paints during long conversions now (stage-boundary yields),
+  instead of freezing until the import finishes.
+
 ## What changed in v2.7.1
 
 - **BeamNG terrain import fixed.** The .ter reader was rewritten to the
@@ -34,12 +72,13 @@ built the way BeamNG builds them: out of **nodes and beams**.
   fallback if the broker is unreachable. Two v2.7 connection bugs
   were fixed along the way (manual-transport joiners could never
   connect; a message-ordering race could wipe content verification).
-- **Known issue (being patched):** a rigid side panel slammed
-  sideways can still thread between the cabin's nodes without
-  registering self-collision contacts (the panel neither stretches
-  nor breaks, so no midpoint particles form). Wall crashes, folds
-  and drops are covered; this specific panel-threading case is the
-  next patch, along with layered detailed error reporting.
+- **Known issue (corrected in v2.7.2):** a rigid side panel slammed
+  sideways was reported as threading between the cabin's nodes
+  without registering self-collision contacts. Re-measurement for
+  v2.7.2 showed that reading was an artifact — the press rolls the
+  car over and the panel arcs over the roof; the real hole was
+  spearing through unstretched sheet interiors, which v2.7.2 fixes
+  (see above).
 
 ## What changed in v2.7
 
