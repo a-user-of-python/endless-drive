@@ -10,39 +10,211 @@ function lowerMap(zipMap){ const m=new Map(); for(const k of zipMap.keys()) m.se
 function getFile(zipMap, lower, path){ const k=lower.get(normPath(path).toLowerCase()); return k===undefined?null:zipMap.get(k); }
 function hasFile(lower,path){ return lower.has(normPath(path).toLowerCase()); }
 
-/* ---------- .ter reader ----------
-   Implemented layout (candidate A, primary): 12-byte header
-     u32LE version (expected 9), u32LE gridSize N, u32LE reserved,
-     then N*N u16LE height samples, row-major (row = z, col = x),
-     height = sample/65535 * maxHeight.
-   Candidate B: headerless raw u16LE grid, N = sqrt(len/2).
-   Candidate C: 16-byte header (version, N, two reserved words), then u16 grid.
-   The reader validates byte length against N*N*2 for each candidate and
-   reports which layout matched; trailing bytes (material/layer data in
-   real .ter files) are tolerated for A/C and noted. If no candidate
-   validates, it throws with the sizes it tried. */
-function parseTer(bytes, opts){
-  opts=opts||{}; const maxHeight=opts.maxHeight||200; const hint=opts.gridSize||0;
-  const dv=new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const candidates=[];
-  function tryCand(name, header, version, N){
-    if(!N || N<2 || N>8192) return null;
-    const need=header+N*N*2;
-    if(bytes.length<need) return null;
-    const exact = bytes.length===need;
-    candidates.push({name:name, header:header, N:N, exact:exact, trailing:bytes.length-need});
-    const heights=new Float32Array(N*N);
-    for(let i=0;i<N*N;i++) heights[i]=dv.getUint16(header+i*2,true)/65535*maxHeight;
-    return { size:N, heights:heights, layout:name, version:version||null, trailingBytes:bytes.length-need };
+/* ---------- .ter reader (BeamNG terrain, version 9) ----------
+   Layout — FIXED, verified against real parser code (Grille.BeamNG.Lib
+   TerrainV9Serializer, Torque3D terrFile; see
+   ~/workspace/research_notes/beamng-ter-format-20261122/report.md):
+     offset 0:        uint8 version (must be 9)
+     offset 1:        uint32LE grid size N (samples per side)
+     offset 5:        N*N uint16LE height samples, index = x + y*N,
+                      first sample = SW (bottom-left) corner, rows
+                      advance south→north.
+                      height_m = sample/65535 * maxHeight, where
+                      maxHeight is NOT in this file and NOT in
+                      theTerrain.terrain.json — it is the TerrainBlock
+                      item's property in items.level.json.
+     offset 5+2N²:    N*N uint8 layer map (material index; 0xFF = hole)
+     offset 5+3N²:    uint32LE material count, then per material a
+                      length-prefixed UTF-8 name (uint8 length; a 0xFF
+                      prefix byte means a uint16LE length follows).
+   This reader is STRICT: it parses exactly this layout, verifies the
+   size equation 5 + 3N² + 4 + Σ(1+len(name)) against the file length
+   (a small trailing remainder is tolerated and reported via
+   trailingBytes), and throws on any mismatch. There is NO layout
+   guessing: the v2.7 reader "validated" a wrong 12-byte-header layout
+   by length alone and produced a spiked garbage heightfield on a real
+   map. A wrong file must fail loudly, never decode wrong. */
+function terParseNames(bytes, dv, offset){
+  if(offset+4 > bytes.length) return null;
+  const count=dv.getUint32(offset, true);
+  if(count>4096) return null;
+  let pos=offset+4; const names=[];
+  for(let i=0;i<count;i++){
+    if(pos>=bytes.length) return null;
+    let len=bytes[pos]; pos+=1;
+    if(len===0xFF){ if(pos+2>bytes.length) return null; len=dv.getUint16(pos, true); pos+=2; }
+    if(pos+len>bytes.length) return null;
+    names.push(decodeText(bytes.subarray(pos, pos+len))); pos+=len;
   }
-  if(bytes.length>=12){ const v=dv.getUint32(0,true), N=dv.getUint32(4,true); const r=tryCand('header12-u16',12,v,N); if(r) return r; }
-  if(bytes.length>=16){ const v=dv.getUint32(0,true), N=dv.getUint32(4,true); const r=tryCand('header16-u16',16,v,N); if(r) return r; }
-  if(hint){ const r=tryCand('hint-header0-u16',0,null,hint); if(r) return r; const r2=tryCand('hint-header12-u16',12,null,hint); if(r2) return r2; }
-  const rawN=Math.sqrt(bytes.length/2); if(Number.isInteger(rawN)){ const r=tryCand('raw-u16',0,null,rawN); if(r) return r; }
-  throw new Error('.ter: no layout validated (length '+bytes.length+'; tried header12/header16 u16 grids'+(hint?', hint N='+hint:'')+', raw grid)');
+  return { names:names, end:pos };
 }
-function makeHeightfield(ter, squareSize){
-  const N=ter.size, worldSize=N*(squareSize||1), heights=ter.heights;
+function parseTer(bytes, opts){
+  opts=opts||{};
+  if(!bytes || bytes.length<5) throw new Error('.ter: file too short ('+(bytes?bytes.length:0)+' bytes) — cannot hold the 5-byte v9 header');
+  const dv=new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const version=bytes[0];
+  if(version!==9) throw new Error('.ter: unsupported version '+version+' (expected 9 — the BeamNG v9 layout is the only layout this reader decodes)');
+  const N=dv.getUint32(1, true);
+  if(!(N>=2 && N<=8192)) throw new Error('.ter: implausible grid size N='+N+' in the header');
+  const heightsEnd=5+N*N*2, layerEnd=heightsEnd+N*N;
+  if(bytes.length<layerEnd+4) throw new Error('.ter: truncated — '+bytes.length+' bytes cannot hold a '+N+'×'+N+' heightmap + layer map + material count (needs at least '+(layerEnd+4)+')');
+  const parsed=terParseNames(bytes, dv, layerEnd);
+  if(!parsed){
+    const v8=(bytes.length>=layerEnd+N*N+4) ? terParseNames(bytes, dv, layerEnd+N*N) : null;
+    if(v8 && bytes.length-v8.end<=4096) throw new Error('.ter: material names do not parse at the v9 offset '+layerEnd+' but do parse one layer-map later — this file carries the deprecated v8 layerTextureMap and is not a plain v9 file');
+    throw new Error('.ter: material names do not parse at offset '+layerEnd+' (count/lengths inconsistent with the '+bytes.length+'-byte file) — the file does not match the v9 layout');
+  }
+  const trailingBytes=bytes.length-parsed.end;
+  if(trailingBytes>4096) throw new Error('.ter: size equation mismatch — the v9 sections end at byte '+parsed.end+' but the file has '+bytes.length+' bytes ('+trailingBytes+' unexplained trailing bytes)');
+  const samples=new Uint16Array(N*N);
+  for(let i=0;i<N*N;i++) samples[i]=dv.getUint16(5+i*2, true);
+  const layerMap=Uint8Array.prototype.slice.call(bytes, heightsEnd, layerEnd);
+  let holeCount=0, maxLayerIndex=-1;
+  for(let i=0;i<N*N;i++){ const li=layerMap[i]; if(li===0xFF) holeCount++; else if(li>maxLayerIndex) maxLayerIndex=li; }
+  const maxHeight=(typeof opts.maxHeight==='number' && opts.maxHeight>0) ? opts.maxHeight : null;
+  const heights=new Float32Array(N*N); const scale=(maxHeight||1)/65535;
+  for(let i=0;i<N*N;i++) heights[i]=samples[i]*scale;
+  return { size:N, version:9, layout:'v9', samples:samples, heights:heights, maxHeightApplied:maxHeight,
+           layerMap:layerMap, materials:parsed.names, holeCount:holeCount, maxLayerIndex:maxLayerIndex,
+           trailingBytes:trailingBytes, sizeEquation:{ expected:parsed.end, actual:bytes.length } };
+}
+/* Sample the raw .ter grid in BeamNG coordinates: u = east, v = north,
+   both in sample units (0..N-1, origin at the SW corner). The variant
+   flags reinterpret the stored grid: flipNS = rows run north→south,
+   transpose = samples stored column-major. Canonical (spec) is
+   flipNS=false, transpose=false. */
+function terSampleBilinear(samples, N, flipNS, transpose, u, v){
+  function idx(bx, by){
+    bx=Math.max(0, Math.min(N-1, bx)); by=Math.max(0, Math.min(N-1, by));
+    if(!transpose) return (flipNS ? (N-1)-by : by)*N + bx;
+    return bx*N + (flipNS ? (N-1)-by : by);
+  }
+  const x0=Math.floor(u), y0=Math.floor(v), fx=u-x0, fy=v-y0;
+  const a=samples[idx(x0,y0)], b=samples[idx(x0+1,y0)], c=samples[idx(x0,y0+1)], d=samples[idx(x0+1,y0+1)];
+  return a+(b-a)*fx+(c-a)*fy+(a-b-c+d)*fx*fy;
+}
+function terSampleStats(samples, layerMap, N){
+  const stride=N>256 ? Math.ceil(N/256) : 1;
+  let sum=0, cnt=0, max=0, sumAll=0, cntAll=0, borderSum=0, borderCnt=0;
+  function solid(i){ return !layerMap || layerMap[i]!==0xFF; }
+  for(let y=0;y<N;y+=stride) for(let x=0;x<N;x+=stride){
+    const i=y*N+x, s=samples[i];
+    if(s>max) max=s; sumAll+=s; cntAll++;
+    if(x===0 || y===0 || x>=N-stride || y>=N-stride){ borderSum+=s; borderCnt++; }
+    if(x+stride<N && solid(i) && solid(i+stride)){ sum+=Math.abs(samples[i+stride]-s)/stride; cnt++; }
+    if(y+stride<N && solid(i) && solid(i+stride*N)){ sum+=Math.abs(samples[i+stride*N]-s)/stride; cnt++; }
+  }
+  return { meanAbsDiff: cnt?sum/cnt:0, maxSample:max, meanSample: cntAll?sumAll/cntAll:0, borderMean: borderCnt?borderSum/borderCnt:0 };
+}
+/* Scored combination search for whatever the files did NOT pin down.
+   The v9 byte layout is never searched (it is proven, and parseTer has
+   already enforced it as a gate — a combination that fails the byte
+   checks cannot exist here). What can remain ambiguous:
+     - maxHeight, when no TerrainBlock provides one
+       (candidates 100/150/200/300/512/600/622 — bracketing the
+       120–622 span observed in real levels; 300 is the guide value)
+     - squareSize, when nothing pins it (candidates 0.5/1/2/4)
+     - orientation: rows south→north (spec) vs flipped, × transposed
+   Scoring (lower wins): slope plausibility — mean slope should sit
+   near 0.25 (log-distance penalty); height/extent plausibility —
+   max terrain height vs map extent outside 0.005..0.6 is penalised;
+   and, when the level has SpawnSphere items, spawn ground sanity —
+   the height sampled at each spawn's BeamNG position must sit near
+   the spawn's own stored height. Spawn sanity is the only term that
+   can discriminate orientation (grid smoothness is invariant under
+   flips/transposes), and a spawn falling OUTSIDE a combination's
+   extent counts as a large error, never as "no signal". Ties break
+   toward squareSize 1 / maxHeight 300 (the common authoring values).
+   The winner and the runner-up scores are recorded in the load
+   report — the choice is visible, never silent.
+   The spawn term samples the raw grid in BeamNG coordinates; that is
+   the same computation the post-build agreement check performs
+   through the CONVERTED engine positions: importMap records
+   report.terrainChoice.spawnGroundErrorMeters from
+   heightfield.heightAt(convertedSpawn) vs each spawn's stored
+   height, so the winning orientation and the converted item
+   placement are verified to agree end to end. */
+function chooseTerrainCombo(ter, src){
+  const N=ter.size, stats=terSampleStats(ter.samples, ter.layerMap, N);
+  const mhList=src.maxHeight ? [src.maxHeight] : [100,150,200,300,512,600,622];
+  const ssList=src.squareSize ? [src.squareSize] : [0.5,1,2,4];
+  const orients=[{flipNS:false,transpose:false},{flipNS:true,transpose:false},{flipNS:false,transpose:true},{flipNS:true,transpose:true}];
+  const spawns=(src.spawns||[]).filter(function(s){ return Array.isArray(s.position) && s.position.length>=3; });
+  const combos=[];
+  for(const o of orients) for(const mh of mhList) for(const ss of ssList){
+    const meanSlope=stats.meanAbsDiff/65535*mh/ss;
+    const slopePenalty=stats.meanAbsDiff===0 ? 0 : Math.abs(Math.log(meanSlope/0.25));
+    const maxH=stats.maxSample/65535*mh, extent=N*ss, ratio=maxH/Math.max(1, extent);
+    const ratioPenalty=ratio<0.005 ? Math.log(0.005/Math.max(ratio,1e-9)) : (ratio>0.6 ? Math.log(ratio/0.6) : 0);
+    let spawnErr=null, spawnPenalty=0;
+    if(spawns.length){
+      const ox=src.tbPos ? src.tbPos[0] : -extent/2, oy=src.tbPos ? src.tbPos[1] : -extent/2;
+      let err=0;
+      for(const sp of spawns){
+        const u=(sp.position[0]-ox)/ss, v=(sp.position[1]-oy)/ss;
+        if(u<-1 || v<-1 || u>N || v>N){ err+=mh*0.5+Math.abs(sp.position[2]); continue; }
+        const h=terSampleBilinear(ter.samples, N, o.flipNS, o.transpose, Math.max(0,Math.min(N-1,u)), Math.max(0,Math.min(N-1,v)))/65535*mh+(src.baseHeight||0);
+        err+=Math.abs(h-sp.position[2]);
+      }
+      spawnErr=err/spawns.length; spawnPenalty=spawnErr/10;
+    }
+    combos.push({ flipNS:o.flipNS, transpose:o.transpose, maxHeight:mh, squareSize:ss,
+                  score:slopePenalty+ratioPenalty+spawnPenalty, spawnErrorMeters:spawnErr,
+                  prior:Math.abs(Math.log(ss/1))+Math.abs(Math.log(mh/300)) });
+  }
+  combos.sort(function(a,b){ const d=a.score-b.score; return Math.abs(d)>1e-6 ? d : a.prior-b.prior; });
+  const win=combos[0];
+  function pub(c){ return { maxHeight:c.maxHeight, squareSize:c.squareSize, flipNS:c.flipNS, transpose:c.transpose, score:c.score, spawnErrorMeters:c.spawnErrorMeters }; }
+  return { maxHeight:win.maxHeight, squareSize:win.squareSize, flipNS:win.flipNS, transpose:win.transpose,
+           score:win.score, spawnErrorMeters:win.spawnErrorMeters,
+           runnersUp:combos.slice(1,4).map(pub), combosTested:combos.length,
+           sources:{ maxHeight: src.maxHeight?'TerrainBlock':'search', squareSize: src.squareSize?'TerrainBlock':'search' },
+           stats:{ meanAbsDiffSamples:stats.meanAbsDiff, maxSample:stats.maxSample, meanSample:stats.meanSample, borderMeanSample:stats.borderMean } };
+}
+/* ---------- heightfield ----------
+   ONE orientation mapping, used identically by the physics sampler
+   (BeamngWorld) and the renderer (mapworld samples heightAt too), so
+   the two can never disagree:
+     file sample (gx, gy): gx west→east, gy south→north, first sample
+     = SW corner. Engine world: +x east, +z SOUTH — the map's north
+     edge sits at z = -worldSize/2, its south edge at z = +worldSize/2.
+   The engine grid is built as eng[ez*N+ex] with ex = gx (west→east)
+   and ez = (N-1) - gy (ez 0 = north edge). The flipNS/transpose
+   variants reinterpret the stored grid before this mapping (they are
+   the importer's scored-search axes; default is the spec mapping).
+   baseHeight (TerrainBlock position[2]) is added to every sample.
+   Level ITEM placement uses this same mapping (see makeItemConverter
+   / beamngHeading in the scene-items section): BeamNG [x east,
+   y north, z up] becomes engine [x east, z = -north] relative to the
+   TerrainBlock corner, so items, roads and spawns register with the
+   terrain instead of sitting mirrored north<->south against it.
+   Holes (layer byte 0xFF): the sampler keeps returning the stored
+   height (BeamngWorld's interface has no hole concept and physics
+   treats hole cells as solid at that height — a documented
+   limitation), but holes are exposed via holeGrid / holeCount /
+   isHoleAt(x,z), and the renderer drops triangles whose corners are
+   all holes. */
+function makeHeightfield(ter, squareSize, opts){
+  opts=opts||{};
+  const N=ter.size, ss=squareSize||1, worldSize=N*ss;
+  const maxHeight=(typeof opts.maxHeight==='number' && opts.maxHeight>0) ? opts.maxHeight : (ter.maxHeightApplied||1);
+  const baseHeight=opts.baseHeight||0, flipNS=!!opts.flipNS, transpose=!!opts.transpose;
+  let samples=ter.samples;
+  if(!samples){ // tolerate old-style {heights} inputs: resynthesise samples
+    samples=new Uint16Array(N*N); const mh=ter.maxHeightApplied||1;
+    for(let i=0;i<N*N;i++) samples[i]=Math.max(0, Math.min(65535, Math.round((ter.heights?ter.heights[i]:0)/mh*65535)));
+  }
+  const layer=ter.layerMap||null, scale=maxHeight/65535;
+  const heights=new Float32Array(N*N), holeGrid=new Uint8Array(N*N);
+  let holeCount=0;
+  for(let ez=0; ez<N; ez++) for(let ex=0; ex<N; ex++){
+    const bx=ex, by=(N-1)-ez; let si;
+    if(!transpose) si=(flipNS ? (N-1)-by : by)*N + bx;
+    else si=bx*N + (flipNS ? (N-1)-by : by);
+    const di=ez*N+ex;
+    heights[di]=samples[si]*scale+baseHeight;
+    if(layer && layer[si]===0xFF){ holeGrid[di]=1; holeCount++; }
+  }
   function heightAt(x,z){
     let gx=((x/worldSize)+0.5)*(N-1), gz=((z/worldSize)+0.5)*(N-1);
     gx=Math.max(0,Math.min(N-1.001,gx)); gz=Math.max(0,Math.min(N-1.001,gz));
@@ -50,13 +222,20 @@ function makeHeightfield(ter, squareSize){
     const a=heights[iz*N+ix], b=heights[iz*N+ix+1], c=heights[(iz+1)*N+ix], d=heights[(iz+1)*N+ix+1];
     return a+(b-a)*fx+(c-a)*fz+(a-b-c+d)*fx*fz;
   }
+  function isHoleAt(x,z){
+    let ex=Math.round(((x/worldSize)+0.5)*(N-1)), ez=Math.round(((z/worldSize)+0.5)*(N-1));
+    ex=Math.max(0,Math.min(N-1,ex)); ez=Math.max(0,Math.min(N-1,ez));
+    return holeGrid[ez*N+ex]===1;
+  }
   function groundHeight(x,z){
     const h=heightAt(x,z), e=(worldSize/(N-1))*1.0||1;
     const dx=heightAt(x+e,z)-heightAt(x-e,z), dz=heightAt(x,z+e)-heightAt(x,z-e);
     let nx=-dx/(2*e), nz=-dz/(2*e), ny=1; const il=1/Math.sqrt(nx*nx+1+nz*nz);
     return { h:h, normal:{x:nx*il,y:ny*il,z:nz*il} };
   }
-  return { size:N, worldSize:worldSize, heights:heights, heightAt:heightAt, groundHeight:groundHeight };
+  return { size:N, worldSize:worldSize, squareSize:ss, maxHeight:maxHeight, baseHeight:baseHeight,
+           flipNS:flipNS, transpose:transpose, heights:heights, holeGrid:holeGrid, holeCount:holeCount,
+           isHoleAt:isHoleAt, heightAt:heightAt, groundHeight:groundHeight };
 }
 
 /* ---------- fallback textures ---------- */
@@ -112,17 +291,84 @@ function parseJsonLines(text){
 }
 function parseJsonSafe(text){ try{ return JSON.parse(text); }catch(e){ return null; } }
 function posOf(item){ const p=item.position||item.pos||item.translation; if(Array.isArray(p)) return [p[0]||0,p[1]||0,p[2]||0]; return [0,0,0]; }
-function quatToMat(q){ const x=q[0],y=q[1],z=q[2],w=q[3]; return [1-2*(y*y+z*z),2*(x*y+z*w),2*(x*z-y*w),0, 2*(x*y-z*w),1-2*(x*x+z*z),2*(y*z+x*w),0, 2*(x*z+y*w),2*(y*z-x*w),1-2*(x*x+y*y),0, 0,0,0,1]; }
-function itemTransform(item){
-  const p=posOf(item); let rot=null;
-  if(Array.isArray(item.rotationMatrix) && item.rotationMatrix.length>=9){ const m=item.rotationMatrix; rot=[m[0],m[3],m[6],0, m[1],m[4],m[7],0, m[2],m[5],m[8],0, 0,0,0,1]; }
-  else if(Array.isArray(item.rotation) && item.rotation.length===4) rot=quatToMat(item.rotation);
-  else if(Array.isArray(item.rotationMatrix) && item.rotationMatrix.length===16) rot=item.rotationMatrix.slice();
-  if(!rot) rot=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
+/* ---------- item placement: BeamNG -> engine ----------
+   ONE mapping for every item-derived position, identical to the
+   terrain mapping in makeHeightfield:
+     BeamNG: [x east, y north, z up], absolute world coords; the
+       terrain's SW corner sits at the TerrainBlock position (cx, cy).
+     Engine: +x east, +y up, +z SOUTH; the heightfield is centred at
+       the origin (x in [-worldSize/2, +worldSize/2], north edge at
+       z = -worldSize/2).
+     engine = [ (bx-cx) - worldSize/2,  bz,  worldSize/2 - (by-cy) ]
+   The corner term is the same centring the heightfield applies, so
+   items register with the terrain they were authored on. With no
+   TerrainBlock position the corner defaults to the centred
+   (-worldSize/2, -worldSize/2) and this reduces to [bx, bz, -by].
+   Rotations convert by conjugation with the basis matrix
+   M = [[1,0,0],[0,0,1],[0,-1,0]] (eng = (bx, bz, -by)):
+   R_eng = M * R_bng * M^T. det(M) = +1 — M is a proper rotation, so
+   meshes are re-based, never mirrored. (The pre-fix code copied item
+   positions verbatim — north landed in the up slot and up in the z
+   slot — and read spawns' z from their height; items sat mirrored
+   north<->south against the terrain and at wrong heights.) */
+const BASIS_M=[1,0,0, 0,0,1, 0,-1,0];
+function mat3Mul(a,b){ const o=new Array(9); for(let r=0;r<3;r++) for(let c=0;c<3;c++) o[r*3+c]=a[r*3]*b[c]+a[r*3+1]*b[3+c]+a[r*3+2]*b[6+c]; return o; }
+function mat3Transpose(a){ return [a[0],a[3],a[6], a[1],a[4],a[7], a[2],a[5],a[8]]; }
+function basisConvert3(L){ return mat3Mul(BASIS_M, mat3Mul(L, mat3Transpose(BASIS_M))); }
+function makeItemConverter(worldSize, tbPos){
+  const ws=worldSize||0;
+  const cx=(tbPos && typeof tbPos[0]==='number' && isFinite(tbPos[0])) ? tbPos[0] : -ws/2;
+  const cy=(tbPos && typeof tbPos[1]==='number' && isFinite(tbPos[1])) ? tbPos[1] : -ws/2;
+  return function(p){ return [ (p[0]-cx)-ws/2, p[2]||0, ws/2-(p[1]-cy) ]; };
+}
+/* The item's rotation as a row-major 3x3 in BeamNG space.
+   items.level.json stores `rotation` as axis-angle
+   [ax, ay, az, angleDegrees] (verified in real level files, e.g.
+   SpawnSphere rotation [0,0,1,148.07]) — NOT a quaternion; the old
+   code read it as one and produced a ~0 heading for almost every
+   spawn. `rotationMatrix` may be 9 elements (row-major) or 16
+   (column-major 4x4); both are read as the same linear map. */
+function beamngRotMat3(item){
+  const rm=item.rotationMatrix;
+  if(Array.isArray(rm) && rm.length>=16) return [rm[0],rm[4],rm[8], rm[1],rm[5],rm[9], rm[2],rm[6],rm[10]];
+  if(Array.isArray(rm) && rm.length>=9) return [rm[0],rm[1],rm[2], rm[3],rm[4],rm[5], rm[6],rm[7],rm[8]];
+  const r=item.rotation;
+  if(Array.isArray(r) && r.length===4){
+    let ax=r[0]||0, ay=r[1]||0, az=r[2]||0; const il=1/Math.hypot(ax,ay,az);
+    if(!isFinite(il)) return [1,0,0, 0,1,0, 0,0,1];
+    ax*=il; ay*=il; az*=il;
+    const th=(r[3]||0)*Math.PI/180, c=Math.cos(th), s=Math.sin(th), t=1-c;
+    return [ t*ax*ax+c,     t*ax*ay-s*az, t*ax*az+s*ay,
+             t*ax*ay+s*az, t*ay*ay+c,     t*ay*az-s*ax,
+             t*ax*az-s*ay, t*ay*az+s*ax, t*az*az+c ];
+  }
+  return [1,0,0, 0,1,0, 0,0,1];
+}
+/* Engine heading for an item. Derivation: an item's facing at
+   identity rotation is BeamNG +Y (north); under R the facing is the
+   second column of R, f = (R[1], R[4], R[7]). The basis map sends f
+   to engine (f.x, f.z, -f.y), and engine heading (the BeamngWorld
+   .trackPoint convention) is atan2(dx, dz) — so heading =
+   atan2(R[1], -R[4]). For a pure BeamNG yaw theta about +Z this
+   gives heading = PI + theta: the sign is POSITIVE because M is a
+   proper rotation (orientation-preserving); only the reference
+   direction changes (BeamNG measures facing from north, engine
+   heading from +z/south). */
+function beamngHeading(item){
+  const R=beamngRotMat3(item);
+  return Math.atan2(R[1], -R[4]);
+}
+function itemTransform(item, toEngine){
+  const p=posOf(item);
+  const R=beamngRotMat3(item);
   const sc=item.scale; const sx=Array.isArray(sc)?(sc[0]||1):(typeof sc==='number'?sc:1), sy=Array.isArray(sc)?(sc[1]===undefined?sx:sc[1]):sx, sz=Array.isArray(sc)?(sc[2]===undefined?sx:sc[2]):sx;
-  const out=rot.slice(); // R * S (column-major: scale columns)
-  for(let c=0;c<3;c++){ const s=[sx,sy,sz][c]; out[c*4]*=s; out[c*4+1]*=s; out[c*4+2]*=s; }
-  out[12]=p[0]; out[13]=p[1]; out[14]=p[2]; return out;
+  // linear part in BeamNG space: L = R * S (scale in local axes)
+  const L=[R[0]*sx,R[1]*sy,R[2]*sz, R[3]*sx,R[4]*sy,R[5]*sz, R[6]*sx,R[7]*sy,R[8]*sz];
+  const Le=basisConvert3(L); // the same linear map, re-based into engine space
+  const out=[0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1];
+  for(let r=0;r<3;r++) for(let c=0;c<3;c++) out[c*4+r]=Le[r*3+c]; // row-major -> column-major
+  const ep=toEngine ? toEngine(p) : [p[0], p[2]||0, -(p[1]||0)];
+  out[12]=ep[0]; out[13]=ep[1]; out[14]=ep[2]; return out;
 }
 function roadNodes(item){
   const raw=item.nodes||item.points||item.roadNodes||[]; const out=[];
@@ -131,6 +377,9 @@ function roadNodes(item){
   return out;
 }
 function buildRibbon(nodes, heightfield, materialName){
+  // nodes carry ENGINE-space positions ([x, up, z], see
+  // makeItemConverter) — importMap converts DecalRoad nodes before
+  // calling this; the ribbon is draped on the heightfield.
   const pts=nodes.map(function(nd){ return {x:nd.position[0], z:nd.position[2], width:nd.width||8}; });
   const positions=[], normals=[], uvs=[], indices=[]; let length=0;
   const cum=[0]; for(let i=1;i<pts.length;i++){ length+=Math.hypot(pts[i].x-pts[i-1].x, pts[i].z-pts[i-1].z); cum.push(length); }
@@ -173,7 +422,7 @@ function collectBrushMap(zipMap, lower){
 
 async function importMap(zipMap, opts){
   opts=opts||{}; const onProgress=opts.onProgress||function(){};
-  const report={ levelName:null, terrainSize:0, worldSize:0, counts:{items:0,roads:0,statics:0,forestPlacements:0,texturesDecoded:0,texturesFallback:0}, missing:[], substitutions:[], warnings:[] };
+  const report={ levelName:null, terrainSize:0, worldSize:0, terrainChoice:null, counts:{items:0,roads:0,statics:0,forestPlacements:0,texturesDecoded:0,texturesFallback:0}, missing:[], substitutions:[], warnings:[] };
   const lower=lowerMap(zipMap);
   const keys=Array.from(zipMap.keys()).map(normPath);
   // locate level
@@ -184,23 +433,86 @@ async function importMap(zipMap, opts){
   const lp=levelPrefix.toLowerCase();
   function levelFiles(suffixTest){ return keys.filter(function(k){ return k.toLowerCase().startsWith(lp) && suffixTest(k.toLowerCase()); }); }
   // info.json
-  let title=levelName; const infoBytes=getFile(zipMap,lower,levelPrefix+'info.json'); if(infoBytes){ const o=parseJsonSafe(decodeText(infoBytes)); if(o&&(o.title||o.name)) title=o.title||o.name; }
+  let title=levelName, infoObj=null; const infoBytes=getFile(zipMap,lower,levelPrefix+'info.json'); if(infoBytes){ const o=parseJsonSafe(decodeText(infoBytes)); if(o){ infoObj=o; if(o.title||o.name) title=o.title||o.name; } }
+  // ---- items are collected BEFORE terrain: the TerrainBlock item in
+  // items.level.json is where maxHeight / squareSize / base height live
+  // (they are in neither the .ter nor theTerrain.terrain.json).
+  // Current BeamNG layout has ONE items.level.json per sub-group folder
+  // under main/MissionGroup/... — scan every *.level.json under the
+  // level folder. A root main.level.json is a stale transitional
+  // fallback: it is only read when no items.level.json exists at all.
+  const items=[]; const levelJsonKeys=levelFiles(function(x){ return x.endsWith('.level.json'); });
+  const itemsKeys=levelJsonKeys.filter(function(k){ return k.toLowerCase().endsWith('items.level.json'); });
+  const rootMainKey=levelPrefix+'main.level.json';
+  let itemKeys=itemsKeys;
+  if(!itemsKeys.length) itemKeys=levelJsonKeys; // transitional layout: root main.level.json only
+  else itemKeys=levelJsonKeys.filter(function(k){ return k!==rootMainKey; });
+  for(const k of itemKeys){ for(const it of parseJsonLines(decodeText(zipMap.get(k)))) items.push(it); }
+  if(!itemsKeys.length && levelJsonKeys.length) report.warnings.push('No items.level.json found — items were read from the transitional root main.level.json, which current BeamNG treats as a stale fallback; contents may be outdated');
+  let terrainBlock=null;
+  for(const it of items){ if((it.class||it.type)==='TerrainBlock'){ terrainBlock=it; break; } }
+  // ---- terrain.json: a PRIMARY cross-check source for what it actually
+  // contains (version, size N, heightMapSize/layerMapSize sample COUNTS,
+  // item sizes, materials) — and nothing else: it has no scale fields.
+  // (Trap avoided: heightMapSize is N², a count — never a grid size.)
+  let terJson=null;
+  for(const k of levelFiles(function(x){return x.endsWith('.terrain.json');})){ const o=parseJsonSafe(decodeText(zipMap.get(k))); if(o){ terJson=o; break; } }
   // ---- terrain
   onProgress({stage:'terrain', frac:0.05, msg:'Reading terrain…'});
-  let squareSize=1, maxHeight=200, gridHint=0;
-  for(const k of levelFiles(function(x){return x.endsWith('.terrain.json');})){ const o=parseJsonSafe(decodeText(zipMap.get(k))); if(o){ if(o.squareSize) squareSize=o.squareSize; if(o.maxHeight) maxHeight=o.maxHeight; if(o.heightmapSize) gridHint=o.heightmapSize; if(o.size) gridHint=o.size; } }
   const terKey=keys.find(function(k){ return k.toLowerCase().startsWith(lp) && k.toLowerCase().endsWith('.ter'); });
-  let heightfield=null, terLayout=null;
-  if(terKey){ const ter=parseTer(zipMap.get(terKey), {maxHeight:maxHeight, gridSize:gridHint}); terLayout=ter.layout; heightfield=makeHeightfield(ter, squareSize); if(ter.trailingBytes>0) report.warnings.push('.ter layout "'+ter.layout+'" matched with '+ter.trailingBytes+' trailing bytes (layer/material data not decoded)'); }
-  else { report.warnings.push('No .ter file found; using flat terrain'); heightfield=makeHeightfield({size:2, heights:new Float32Array(4)}, squareSize); report.missing.push({kind:'other', path:levelPrefix+'theTerrain.ter', referencedBy:'level'}); }
+  let heightfield=null, terLayout=null, itemConvert=null;
+  if(terKey){
+    const ter=parseTer(zipMap.get(terKey), {}); // strict v9 — throws loudly on any mismatch
+    terLayout=ter.layout;
+    // cross-validate the decode against terrain.json (mismatch = warning, .ter wins)
+    if(terJson){
+      if(terJson.size && terJson.size!==ter.size) report.warnings.push('terrain.json size '+terJson.size+' disagrees with the .ter header N='+ter.size+' — the .ter header wins');
+      if(terJson.heightMapSize && terJson.heightMapSize!==ter.size*ter.size) report.warnings.push('terrain.json heightMapSize '+terJson.heightMapSize+' disagrees with N²='+(ter.size*ter.size)+' from the .ter');
+      if(terJson.layerMapSize && terJson.layerMapSize!==ter.size*ter.size) report.warnings.push('terrain.json layerMapSize '+terJson.layerMapSize+' disagrees with N²='+(ter.size*ter.size)+' from the .ter');
+      if(terJson.heightMapItemSize && terJson.heightMapItemSize!==2) report.warnings.push('terrain.json heightMapItemSize is '+terJson.heightMapItemSize+', expected 2 for v9');
+      if(terJson.layerMapItemSize && terJson.layerMapItemSize!==1) report.warnings.push('terrain.json layerMapItemSize is '+terJson.layerMapItemSize+', expected 1 for v9');
+      if(terJson.version && terJson.version!==ter.version) report.warnings.push('terrain.json version '+terJson.version+' disagrees with the .ter version byte '+ter.version);
+      if(Array.isArray(terJson.materials) && JSON.stringify(terJson.materials)!==JSON.stringify(ter.materials)) report.warnings.push('terrain.json materials ['+terJson.materials.join(', ')+'] disagree with the .ter material names ['+ter.materials.join(', ')+'] — the .ter names win');
+    }
+    if(ter.trailingBytes>0) report.warnings.push('.ter has '+ter.trailingBytes+' trailing bytes after the material names (tolerated, not decoded)');
+    if(ter.maxLayerIndex>=ter.materials.length) report.warnings.push('.ter layer map references material index '+ter.maxLayerIndex+' but only '+ter.materials.length+' material names are stored');
+    // scale sources: TerrainBlock wins outright; the rest is searched.
+    // squareSize is ABSENT in real-world TerrainBlocks (the serializer
+    // omits it at the default) — absence means 1.0, logged as an
+    // assumption (inference from real files, not a verified rule).
+    let tbMax=null, tbSquare=null, baseHeight=0, tbPos=null, squareAssumed=false;
+    if(terrainBlock){
+      if(typeof terrainBlock.maxHeight==='number' && terrainBlock.maxHeight>0) tbMax=terrainBlock.maxHeight;
+      if(typeof terrainBlock.squareSize==='number' && terrainBlock.squareSize>0) tbSquare=terrainBlock.squareSize;
+      else { tbSquare=1; squareAssumed=true; }
+      if(Array.isArray(terrainBlock.position)){ tbPos=terrainBlock.position; if(typeof tbPos[2]==='number' && isFinite(tbPos[2])) baseHeight=tbPos[2]; }
+    }
+    const spawnItems=items.filter(function(it){ return (it.class||it.type)==='SpawnSphere'; });
+    const choice=chooseTerrainCombo(ter, { maxHeight:tbMax, squareSize:tbSquare, baseHeight:baseHeight, tbPos:tbPos, spawns:spawnItems });
+    heightfield=makeHeightfield(ter, choice.squareSize, { maxHeight:choice.maxHeight, baseHeight:baseHeight, flipNS:choice.flipNS, transpose:choice.transpose });
+    itemConvert=makeItemConverter(heightfield.worldSize, tbPos);
+    report.terrainChoice={ size:ter.size, layout:terLayout, trailingBytes:ter.trailingBytes, materials:ter.materials,
+      holeCount:heightfield.holeCount, baseHeight:baseHeight, terrainJsonFound:!!terJson, terrainBlockFound:!!terrainBlock,
+      maxHeight:choice.maxHeight, maxHeightSource:choice.sources.maxHeight, squareSize:choice.squareSize, squareSizeSource:choice.sources.squareSize,
+      flipNS:choice.flipNS, transpose:choice.transpose, score:choice.score, spawnErrorMeters:choice.spawnErrorMeters,
+      runnersUp:choice.runnersUp, combosTested:choice.combosTested, stats:choice.stats };
+    if(squareAssumed) report.terrainChoice.squareSizeSource='TerrainBlock default (field absent — assumed 1.0)';
+    if(!terrainBlock) report.warnings.push('No TerrainBlock in items.level.json — maxHeight '+choice.maxHeight+' and squareSize '+choice.squareSize+' were chosen by the scored combination search (see report.terrainChoice), not read from the level; if the terrain looks wrong, these are the values to question');
+    else {
+      if(tbMax===null) report.warnings.push('TerrainBlock has no maxHeight — '+choice.maxHeight+' was chosen by the scored search (see report.terrainChoice)');
+      if(squareAssumed) report.warnings.push('TerrainBlock omits squareSize (the serializer drops it at the default) — assumed 1.0; this is an inference from real level files, not a verified rule');
+      if(tbPos && (Math.abs(tbPos[0]+heightfield.worldSize/2)>1 || Math.abs(tbPos[1]+heightfield.worldSize/2)>1)) report.warnings.push('TerrainBlock position ['+tbPos.join(', ')+'] is not the centred SW corner — the heightfield is built centred at the origin and item positions are converted relative to the declared corner, so items stay registered to the terrain');
+    }
+    if(!terJson) report.warnings.push('No theTerrain.terrain.json found — decode cross-checks against it were skipped');
+  }
+  else { report.warnings.push('No .ter file found; using flat terrain'); heightfield=makeHeightfield({size:2, samples:new Uint16Array(4), layerMap:new Uint8Array(4), materials:[], maxHeightApplied:1}, 1, {}); itemConvert=makeItemConverter(0, null); report.missing.push({kind:'other', path:levelPrefix+'theTerrain.ter', referencedBy:'level'}); }
   const pngHm=keys.filter(function(k){ return /heightmap.*\.png$/i.test(k) || /import\/.*\.png$/i.test(k); });
   if(pngHm.length) report.warnings.push('Heightmap PNG present ('+pngHm.join(', ')+') — noted only; .ter is the primary height source (PNG heightmap decoding not implemented)');
   report.terrainSize=heightfield.size; report.worldSize=heightfield.worldSize;
   onProgress({stage:'terrain', frac:0.2, msg:'Terrain '+heightfield.size+'×'+heightfield.size+' ('+Math.round(heightfield.worldSize)+' m) from '+(terLayout||'fallback')});
   // ---- items
   onProgress({stage:'items', frac:0.25, msg:'Reading scene items…'});
-  const items=[]; const spawns=[], roads=[], staticsRaw=[], notes=[];
-  for(const k of levelFiles(function(x){ return x.endsWith('items.level.json'); })){ for(const it of parseJsonLines(decodeText(zipMap.get(k)))) items.push(it); }
+  const spawns=[], roads=[], staticsRaw=[], notes=[];
   const matDefs=collectMaterialDefs(zipMap, lower);
   const meshCache=new Map();
   function loadMesh(path, referencedBy){
@@ -214,12 +526,28 @@ async function importMap(zipMap, opts){
   }
   for(const it of items){
     const cls=it.class||it.type||'';
-    if(cls==='SpawnSphere'){ const p=posOf(it); let heading=0; if(Array.isArray(it.rotation)&&it.rotation.length===4){ heading=Math.atan2(2*(it.rotation[3]*it.rotation[1]+it.rotation[0]*it.rotation[2]), 1-2*(it.rotation[1]*it.rotation[1]+it.rotation[2]*it.rotation[2])); } spawns.push({position:p, x:p[0], z:p[2], heading:heading, item:it}); }
-    else if(cls==='DecalRoad'){ const nds=roadNodes(it); if(nds.length>=2) roads.push(buildRibbon(nds, heightfield, it.material||it.texture||'road')); else report.warnings.push('DecalRoad with <2 nodes skipped'); }
+    if(cls==='SpawnSphere'){ const ep=itemConvert(posOf(it)); spawns.push({position:ep, x:ep[0], z:ep[2], heading:beamngHeading(it), item:it}); }
+    else if(cls==='DecalRoad'){ const nds=roadNodes(it); if(nds.length>=2){ const cnds=nds.map(function(nd){ return { position:itemConvert(nd.position), width:nd.width }; }); roads.push(buildRibbon(cnds, heightfield, it.material||it.texture||'road')); } else report.warnings.push('DecalRoad with <2 nodes skipped'); }
     else if(cls==='MeshRoad'){ notes.push('MeshRoad item present — geometry via its DAE if in zip, else missing (see report)'); const mp=it.shapeName||it.mesh; if(mp){ if(!loadMesh(mp,'MeshRoad')){} } }
     else if(cls==='LevelInfo'){ if(it.sunElevation!==undefined||it.sky){ notes.push('LevelInfo found (sun/sky basics not converted)'); } }
     const shape=it.shapeName||it.shapeFile||it.mesh||it.filename;
-    if(typeof shape==='string' && shape){ const mesh=loadMesh(shape, cls||'item'); if(mesh) staticsRaw.push({mesh:mesh, transform:itemTransform(it), materialNames: mesh.materials||[], item:it, shapeName:shape}); }
+    if(typeof shape==='string' && shape){ const mesh=loadMesh(shape, cls||'item'); if(mesh) staticsRaw.push({mesh:mesh, transform:itemTransform(it, itemConvert), materialNames: mesh.materials||[], item:it, shapeName:shape}); }
+  }
+  // the level's DEFAULT spawn is named in info.json
+  // (defaultSpawnPointName / spawnPoints[].objectname, matching the
+  // SpawnSphere's name) — put it first; BeamngWorld spawns at [0].
+  if(infoObj && spawns.length>1){
+    let defName=infoObj.defaultSpawnPointName||null;
+    if(!defName && Array.isArray(infoObj.spawnPoints) && infoObj.spawnPoints.length) defName=infoObj.spawnPoints[0].objectname||null;
+    if(defName){ const di=spawns.findIndex(function(s){ return s.item && s.item.name===defName; }); if(di>0){ const d=spawns.splice(di,1)[0]; spawns.unshift(d); } }
+  }
+  // agreement check: the winning terrain combination + the CONVERTED
+  // (engine-space) spawn positions must put every spawn on the ground
+  // the heightfield reports — the end-to-end proof that item
+  // conversion and terrain orientation agree (see chooseTerrainCombo).
+  if(terKey && report.terrainChoice && spawns.length){
+    let worst=0; for(const s of spawns){ const bp=s.item && s.item.position; if(Array.isArray(bp)) worst=Math.max(worst, Math.abs(heightfield.heightAt(s.x, s.z)-(bp[2]||0))); }
+    report.terrainChoice.spawnGroundErrorMeters=worst;
   }
   report.counts.items=items.length;
   onProgress({stage:'items', frac:0.4, msg:'Parsed '+items.length+' scene items ('+spawns.length+' spawns)'});
@@ -230,7 +558,7 @@ async function importMap(zipMap, opts){
   const brushMap=collectBrushMap(zipMap, lower); const forestPlacements=[]; const forestCounts={};
   const forestFiles=keys.filter(function(k){ const lk=k.toLowerCase(); return lk.startsWith(lp) && (lk.endsWith('.forest.json')||lk.endsWith('.forest4.json')); });
   for(const k of forestFiles){ const entries=parseJsonLines(decodeText(zipMap.get(k))); if(!entries.length){ const o=parseJsonSafe(decodeText(zipMap.get(k))); if(Array.isArray(o)) entries.push.apply(entries,o); }
-    for(const e of entries){ const type=e.type||e.name||'unknown'; const meshPath=brushMap[type]||e.mesh||e.shapeName||null; const p=posOf(e);
+    for(const e of entries){ const type=e.type||e.name||'unknown'; const meshPath=brushMap[type]||e.mesh||e.shapeName||null; const p=itemConvert(posOf(e));
       forestPlacements.push({ meshPath:meshPath, position:p, rotation:e.rotation||null, scale:e.scale===undefined?1:e.scale, type:type });
       forestCounts[type]=(forestCounts[type]||0)+1;
       if(meshPath) loadMesh(meshPath, 'forest:'+type); else report.missing.push({kind:'mesh', path:'(unmapped forest type)', referencedBy:'forest:'+type});
@@ -290,6 +618,12 @@ class BeamngWorld{
     for(const f of (converted.forestPlacements||[])) this._obstacles.push({type:'tree', x:f.position[0], z:f.position[2], y:f.position[1], r:0.5, h:3.4, s:0, lat:0});
   }
   spawnPoint(){ if(this.spawns.length){ const s=this.spawns[0]; return {x:s.x, z:s.z, heading:s.heading||0}; } return {x:0, z:0, heading:0}; }
+  /* Holes (layer byte 0xFF) are exposed here for callers that care.
+     The ground queries below keep returning the stored height over a
+     hole — this interface has no hole concept and the sim treats hole
+     cells as solid at that height (documented limitation); only the
+     renderer reacts to holes (it drops all-hole triangles). */
+  isHoleAt(x,z){ return this.heightfield.isHoleAt ? this.heightfield.isHoleAt(x,z) : false; }
   trackPoint(s){
     s=Math.max(0, Math.min(this._trackLen, s||0)); const pts=this._trackPts, cum=this._trackCum;
     let i=0; while(i<cum.length-2 && cum[i+1]<s) i++;
