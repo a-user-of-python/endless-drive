@@ -12,6 +12,10 @@
      LoadingScreen.done()           close the overlay (success)
      LoadingScreen.fail(msg)        show an error + a Back button; the bar
                                     stays where the work actually stopped
+     LoadingScreen.failDetail(d)    layered failure (v2.7.2): d is a
+                                    __EDERR formatError result — headline,
+                                    where, why, hint as separate lines,
+                                    also written to the log
      LoadingScreen.onBack = fn      optional hook run when Back is pressed
      LoadingScreen.isOpen()         whether the overlay is visible
      LoadingScreen.setRoomCode(code, label)
@@ -219,8 +223,39 @@
     log('FAILED: ' + (msg || 'unknown error'));
   }
 
+  /* Layered failure (v2.7.2, js/ui/errors.js format): headline first,
+     then where / why / hint as separate lines — never one wall of
+     text. The same layers are written to the log, so the transcript
+     keeps them after the panel closes. Stays until Back, like fail(). */
+  function failDetail(d){
+    var e = build();
+    d = d || {};
+    e.err.innerHTML = '';
+    function line(txt, bold, pre){
+      if (!txt) return;
+      var div = document.createElement('div');
+      div.textContent = txt;
+      if (bold){ div.style.fontWeight = '800'; div.style.fontSize = '17px'; }
+      if (pre) div.style.whiteSpace = 'pre-line';
+      e.err.appendChild(div);
+    }
+    line(d.headline || 'Something went wrong.', true, false);
+    line(d.where, false, false);
+    line(d.why, false, true);
+    line(d.hint ? 'Hint: ' + d.hint : '', false, false);
+    e.err.classList.remove('hidden');
+    e.status.textContent = 'Stopped — see the error below.';
+    e.back.textContent = 'Back';
+    e.back.classList.remove('hidden');
+    e.root.classList.remove('hidden');
+    log('FAILED: ' + (d.headline || 'unknown error'));
+    if (d.where) log(d.where);
+    if (d.why) String(d.why).split('\n').forEach(function(l){ log(l); });
+    if (d.hint) log('Hint: ' + d.hint);
+  }
+
   window.LoadingScreen = {
-    show: show, stage: stage, log: log, done: done, fail: fail,
+    show: show, stage: stage, log: log, done: done, fail: fail, failDetail: failDetail,
     setRoomCode: setRoomCode, clearRoomCode: clearRoomCode, showBack: showBack,
     roomCode: function(){ return roomCodeValue; },
     onBack: null,
