@@ -73,7 +73,10 @@
     max-width:760px; width:92%; background:rgba(46,10,10,.94); border:2px solid #e83a2e;
     border-radius:12px; padding:18px 22px; color:#ffe9e6; }
   #fatalBox .ft { font-size:24px; font-weight:800; margin-bottom:6px; }
-  #fatalBox .fm { font-size:18px; line-height:1.45; }
+  #fatalBox .fm { font-size:20px; font-weight:700; line-height:1.4; }
+  #fatalBox .fw { font-size:16px; line-height:1.45; color:#ffd9d2; margin-top:4px; white-space:pre-line; }
+  #fatalBox .fm2 { font-size:17px; line-height:1.45; margin-top:4px; white-space:pre-line; }
+  #fatalBox .fh { font-size:16px; line-height:1.45; color:#ffe9a8; margin-top:6px; }
   #fatalBox pre { font-size:14px; white-space:pre-wrap; word-break:break-word; color:#ffb4a8;
     background:rgba(0,0,0,.35); border-radius:8px; padding:10px 12px; margin:10px 0; max-height:180px; overflow:auto; }
   #fatalBox button { background:#e83a2e; color:#fff; border:none; font-size:17px; font-weight:700;
@@ -85,6 +88,9 @@
 <div id="fatalBox" class="hidden">
   <div class="ft">Endless Drive hit a problem</div>
   <div class="fm" id="fatalMsg"></div>
+  <div class="fw" id="fatalWhere"></div>
+  <div class="fm2" id="fatalWhy"></div>
+  <div class="fh" id="fatalHint"></div>
   <pre id="fatalTech"></pre>
   <button id="fatalDismiss">Dismiss</button>
 </div>
@@ -293,6 +299,7 @@ if (!window.Peer){
 <script src="js/render/world.js"></script>
 <script src="js/render/mapworld.js"></script>
 <script src="js/ui/loading.js"></script>
+<script src="js/ui/errors.js"></script>
 <script src="js/ui/parts.js"></script>
 <script src="js/net/multiplayer.js"></script>
 <script src="js/game.js"></script>
