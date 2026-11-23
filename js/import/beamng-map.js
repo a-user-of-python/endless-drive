@@ -421,14 +421,28 @@ function collectBrushMap(zipMap, lower){
 }
 
 async function importMap(zipMap, opts){
-  opts=opts||{}; const onProgress=opts.onProgress||function(){};
+  opts=opts||{};
+  /* Progress + a yield at every stage boundary (v2.7.2): this function
+     is async but the conversion itself is synchronous CPU work, so
+     without the yield the whole conversion is ONE task and the
+     browser cannot paint the loading bar/log the callbacks update —
+     on a big map the overlay froze on one frame until the import
+     finished. The yield changes timing only, never results. */
+  const onProgressRaw=opts.onProgress||function(){};
+  const onProgress=async function(p){ onProgressRaw(p); await new Promise(function(r){ setTimeout(r, 0); }); };
+  /* Stage context for the layered error reporter (js/ui/errors.js):
+     errors thrown here carry WHERE they happened as plain properties
+     (edStage / edFile) — this module never imports the reporter, the
+     game's formatError just reads the properties. Only set if absent,
+     so the innermost, most specific context wins. */
+  function tagStage(e, stage, file){ if(e && typeof e==='object'){ if(!e.edStage) e.edStage=stage; if(!e.edFile && file) e.edFile=file; } return e; }
   const report={ levelName:null, terrainSize:0, worldSize:0, terrainChoice:null, counts:{items:0,roads:0,statics:0,forestPlacements:0,texturesDecoded:0,texturesFallback:0}, missing:[], substitutions:[], warnings:[] };
   const lower=lowerMap(zipMap);
   const keys=Array.from(zipMap.keys()).map(normPath);
   // locate level
   let levelPrefix=null, levelName=null;
   for(const k of keys){ const m=/^levels\/([^/]+)\//i.exec(k); if(m){ levelPrefix='levels/'+m[1]+'/'; levelName=m[1]; break; } }
-  if(!levelPrefix) throw new Error('importMap: no levels/<name>/ folder found in zip');
+  if(!levelPrefix) throw tagStage(new Error('importMap: no levels/<name>/ folder found in zip'), 'level', '(zip root — no levels/ folder)');
   report.levelName=levelName;
   const lp=levelPrefix.toLowerCase();
   function levelFiles(suffixTest){ return keys.filter(function(k){ return k.toLowerCase().startsWith(lp) && suffixTest(k.toLowerCase()); }); }
@@ -458,11 +472,13 @@ async function importMap(zipMap, opts){
   let terJson=null;
   for(const k of levelFiles(function(x){return x.endsWith('.terrain.json');})){ const o=parseJsonSafe(decodeText(zipMap.get(k))); if(o){ terJson=o; break; } }
   // ---- terrain
-  onProgress({stage:'terrain', frac:0.05, msg:'Reading terrain…'});
+  await onProgress({stage:'terrain', frac:0.05, msg:'Reading terrain…'});
   const terKey=keys.find(function(k){ return k.toLowerCase().startsWith(lp) && k.toLowerCase().endsWith('.ter'); });
   let heightfield=null, terLayout=null, itemConvert=null;
   if(terKey){
-    const ter=parseTer(zipMap.get(terKey), {}); // strict v9 — throws loudly on any mismatch
+    let ter;
+    try { ter=parseTer(zipMap.get(terKey), {}); } // strict v9 — throws loudly on any mismatch
+    catch(e){ throw tagStage(e, 'terrain', terKey); }
     terLayout=ter.layout;
     // cross-validate the decode against terrain.json (mismatch = warning, .ter wins)
     if(terJson){
@@ -509,9 +525,9 @@ async function importMap(zipMap, opts){
   const pngHm=keys.filter(function(k){ return /heightmap.*\.png$/i.test(k) || /import\/.*\.png$/i.test(k); });
   if(pngHm.length) report.warnings.push('Heightmap PNG present ('+pngHm.join(', ')+') — noted only; .ter is the primary height source (PNG heightmap decoding not implemented)');
   report.terrainSize=heightfield.size; report.worldSize=heightfield.worldSize;
-  onProgress({stage:'terrain', frac:0.2, msg:'Terrain '+heightfield.size+'×'+heightfield.size+' ('+Math.round(heightfield.worldSize)+' m) from '+(terLayout||'fallback')});
+  await onProgress({stage:'terrain', frac:0.2, msg:'Terrain '+heightfield.size+'×'+heightfield.size+' ('+Math.round(heightfield.worldSize)+' m) from '+(terLayout||'fallback')});
   // ---- items
-  onProgress({stage:'items', frac:0.25, msg:'Reading scene items…'});
+  await onProgress({stage:'items', frac:0.25, msg:'Reading scene items…'});
   const spawns=[], roads=[], staticsRaw=[], notes=[];
   const matDefs=collectMaterialDefs(zipMap, lower);
   const meshCache=new Map();
@@ -520,7 +536,7 @@ async function importMap(zipMap, opts){
     if(!full){ report.missing.push({kind:'mesh', path:np, referencedBy:referencedBy}); return null; }
     if(meshCache.has(full)) return meshCache.get(full);
     let mesh=null;
-    if(full.toLowerCase().endsWith('.dae')){ if(!_DAE){ report.warnings.push('DAE parser unavailable for '+full); } else { const parsed=_DAE.parseDAE(decodeText(zipMap.get(full))); mesh=parsed; } }
+    if(full.toLowerCase().endsWith('.dae')){ if(!_DAE){ report.warnings.push('DAE parser unavailable for '+full); } else { try { mesh=_DAE.parseDAE(decodeText(zipMap.get(full))); } catch(e){ throw tagStage(e, 'statics', full); } } }
     else { report.warnings.push('Mesh format not decoded (kept as reference): '+full); mesh={meshes:{},nodes:[],materials:[],unsupportedFormat:true}; }
     meshCache.set(full, mesh); return mesh;
   }
@@ -550,11 +566,11 @@ async function importMap(zipMap, opts){
     report.terrainChoice.spawnGroundErrorMeters=worst;
   }
   report.counts.items=items.length;
-  onProgress({stage:'items', frac:0.4, msg:'Parsed '+items.length+' scene items ('+spawns.length+' spawns)'});
-  onProgress({stage:'roads', frac:0.5, msg:'Building '+roads.length+' decal road ribbons…'});
+  await onProgress({stage:'items', frac:0.4, msg:'Parsed '+items.length+' scene items ('+spawns.length+' spawns)'});
+  await onProgress({stage:'roads', frac:0.5, msg:'Building '+roads.length+' decal road ribbons…'});
   report.counts.roads=roads.length;
   // ---- forest
-  onProgress({stage:'forest', frac:0.55, msg:'Placing forest items…'});
+  await onProgress({stage:'forest', frac:0.55, msg:'Placing forest items…'});
   const brushMap=collectBrushMap(zipMap, lower); const forestPlacements=[]; const forestCounts={};
   const forestFiles=keys.filter(function(k){ const lk=k.toLowerCase(); return lk.startsWith(lp) && (lk.endsWith('.forest.json')||lk.endsWith('.forest4.json')); });
   for(const k of forestFiles){ const entries=parseJsonLines(decodeText(zipMap.get(k))); if(!entries.length){ const o=parseJsonSafe(decodeText(zipMap.get(k))); if(Array.isArray(o)) entries.push.apply(entries,o); }
@@ -564,11 +580,11 @@ async function importMap(zipMap, opts){
       if(meshPath) loadMesh(meshPath, 'forest:'+type); else report.missing.push({kind:'mesh', path:'(unmapped forest type)', referencedBy:'forest:'+type});
     } }
   report.counts.forestPlacements=forestPlacements.length;
-  onProgress({stage:'forest', frac:0.65, msg:'Placing '+forestPlacements.length+' forest items…'});
+  await onProgress({stage:'forest', frac:0.65, msg:'Placing '+forestPlacements.length+' forest items…'});
   // ---- statics + textures
-  onProgress({stage:'statics', frac:0.7, msg:'Converting '+staticsRaw.length+' static meshes…'});
+  await onProgress({stage:'statics', frac:0.7, msg:'Converting '+staticsRaw.length+' static meshes…'});
   report.counts.statics=staticsRaw.length;
-  onProgress({stage:'textures', frac:0.8, msg:'Decoding textures…'});
+  await onProgress({stage:'textures', frac:0.8, msg:'Decoding textures…'});
   const textures={};
   const wantedTex=new Map(); // materialLower -> def
   for(const name of Object.keys(matDefs)) wantedTex.set(name, matDefs[name]);
@@ -594,11 +610,12 @@ async function importMap(zipMap, opts){
     textures[def.name]=makeFallbackTexture(cls, def.tint); report.counts.texturesFallback++;
     report.substitutions.push({material:def.name, wantedPath:def.texture||null, class:cls, tinted:!!def.tint});
   }
-  onProgress({stage:'textures', frac:0.9, msg:'Textures: '+report.counts.texturesDecoded+' decoded, '+report.counts.texturesFallback+' fallback'});
+  await onProgress({stage:'textures', frac:0.9, msg:'Textures: '+report.counts.texturesDecoded+' decoded, '+report.counts.texturesFallback+' fallback'});
   const converted={ levelName:levelName, title:title, heightfield:heightfield, terrainLayout:terLayout, items:items, spawns:spawns, roads:roads, statics:staticsRaw, forestPlacements:forestPlacements, forestCounts:forestCounts, textures:textures, materials:matDefs, notes:notes, report:report };
-  onProgress({stage:'world', frac:0.95, msg:'Building world…'});
-  converted.world=new BeamngWorld(converted);
-  onProgress({stage:'done', frac:1, msg:'Done: '+levelName+' — '+report.counts.items+' items, '+report.counts.roads+' roads, '+report.counts.forestPlacements+' forest placements'});
+  await onProgress({stage:'world', frac:0.95, msg:'Building world…'});
+  try { converted.world=new BeamngWorld(converted); }
+  catch(e){ throw tagStage(e, 'world', levelPrefix); }
+  await onProgress({stage:'done', frac:1, msg:'Done: '+levelName+' — '+report.counts.items+' items, '+report.counts.roads+' roads, '+report.counts.forestPlacements+' forest placements'});
   return converted;
 }
 
